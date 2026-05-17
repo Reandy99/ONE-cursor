@@ -178,27 +178,32 @@ def extract_post_age(text: str, now: datetime | None = None) -> timedelta | None
     """
     now = now or datetime.now(LOCAL_TZ)
     lowered = text.lower()
+    timestamp_scope = lowered[:120]
 
-    if any(marker in lowered for marker in ("baru saja", "just now", "seconds ago")):
-        return timedelta(seconds=0)
+    date_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", timestamp_scope)
+    if date_match:
+        if not config.ACCEPT_DATE_ONLY_CURRENT_DAY:
+            return None
 
-    minute_match = re.search(r"\b(\d+)\s*(menit|mnt|min|mins|minute|minutes)\b", lowered)
-    if minute_match:
-        return timedelta(minutes=int(minute_match.group(1)))
-
-    hour_match = re.search(r"\b(\d+)\s*(jam|hour|hours|hr|hrs|h)\b", lowered)
-    if hour_match:
-        return timedelta(hours=int(hour_match.group(1)))
-
-    day_match = re.search(r"\b(\d+)\s*(hari|day|days|d)\b", lowered)
-    if day_match or "kemarin" in lowered or "yesterday" in lowered:
-        return timedelta(days=1)
-
-    date_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lowered)
-    if date_match and config.ACCEPT_DATE_ONLY_CURRENT_DAY:
         day, month, year = (int(part) for part in date_match.groups())
         if now.date() == datetime(year, month, day, tzinfo=LOCAL_TZ).date():
             return timedelta(seconds=0)
+        return None
+
+    if any(marker in timestamp_scope for marker in ("baru saja", "just now", "seconds ago")):
+        return timedelta(seconds=0)
+
+    minute_match = re.search(r"\b(\d+)\s*(menit|mnt|min|mins|minute|minutes)\b", timestamp_scope)
+    if minute_match:
+        return timedelta(minutes=int(minute_match.group(1)))
+
+    hour_match = re.search(r"\b(\d+)\s*(jam|hour|hours|hr|hrs|h)\b", timestamp_scope)
+    if hour_match:
+        return timedelta(hours=int(hour_match.group(1)))
+
+    day_match = re.search(r"\b(\d+)\s*(hari|day|days|d)\b", timestamp_scope)
+    if day_match or "kemarin" in timestamp_scope or "yesterday" in timestamp_scope:
+        return timedelta(days=1)
 
     return None
 

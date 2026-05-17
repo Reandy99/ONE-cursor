@@ -218,6 +218,10 @@ def extract_post_age(timestamp_text: str, now: datetime | None = None) -> timede
     if not timestamp_scope:
         return None
 
+    parsed_timestamp = parse_timestamp_datetime(timestamp_scope)
+    if parsed_timestamp:
+        return now - parsed_timestamp.astimezone(LOCAL_TZ)
+
     date_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", timestamp_scope)
     if date_match:
         if not config.ACCEPT_DATE_ONLY_CURRENT_DAY:
@@ -244,6 +248,23 @@ def extract_post_age(timestamp_text: str, now: datetime | None = None) -> timede
         return timedelta(days=int(day_match.group(1)) if day_match else 1)
 
     return None
+
+
+def parse_timestamp_datetime(value: str) -> datetime | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    for date_format in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            return datetime.strptime(cleaned, date_format)
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def get_post_age(posted_at: str, text: str, now: datetime | None = None) -> timedelta | None:
@@ -510,6 +531,87 @@ def build_lead(keyword: str, text: str, post_url: str, posted_at: str, scraped_a
     )
 
 
+def api_time_range() -> tuple[int, int]:
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(hours=config.MAX_POST_AGE_HOURS)
+    return int(since.timestamp()), int(until.timestamp())
+
+
+def crawl_keyword_with_threads_api(keyword: str) -> list[Lead]:
+    if not config.THREADS_ACCESS_TOKEN:
+        return []
+
+    since, until = api_time_range()
+    params = {
+        "q": keyword,
+        "search_type": config.THREADS_API_SEARCH_TYPE or "RECENT",
+        "search_mode": "KEYWORD",
+        "since": since,
+        "until": until,
+        "limit": min(max(config.THREADS_API_LIMIT, 1), 100),
+        "fields": "id,text,media_type,permalink,timestamp,username,has_replies,is_quote_post,is_reply",
+        "access_token": config.THREADS_ACCESS_TOKEN,
+    }
+
+    try:
+        response = requests.get(
+            config.THREADS_API_KEYWORD_SEARCH_URL,
+            params=params,
+            timeout=config.THREADS_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except RequestException as exc:
+        logger.error("Threads API search failed for keyword %r: %s", keyword, exc)
+        return []
+    except ValueError as exc:
+        logger.error("Threads API returned invalid JSON for keyword %r: %s", keyword, exc)
+        return []
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        logger.warning("Threads API response for keyword %r did not contain a data list.", keyword)
+        return []
+
+    scraped_at = datetime.now(timezone.utc).isoformat()
+    leads: list[Lead] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        text = normalize_text(str(item.get("text", "")))
+        post_url = normalize_post_url(str(item.get("permalink", "")))
+        posted_at = normalize_text(str(item.get("timestamp", "")))
+        if not text or not post_url:
+            continue
+
+        if not passes_location_filter(text):
+            continue
+
+        if not passes_recency_filter(posted_at, text):
+            continue
+
+        score = calculate_lead_score(text)
+        if score < config.MIN_LEAD_SCORE:
+            continue
+
+        lead = build_lead(keyword, text, post_url, posted_at, scraped_at)
+        if item.get("username"):
+            lead.username = str(item["username"])
+        leads.append(lead)
+
+    logger.info("Threads API found %s leads for keyword %r.", len(leads), keyword)
+    return leads
+
+
+def crawl_keywords_with_threads_api(keywords: list[str]) -> list[Lead]:
+    all_candidates: list[Lead] = []
+    for keyword in keywords:
+        logger.info("Searching Threads API for %r.", keyword)
+        all_candidates.extend(crawl_keyword_with_threads_api(keyword))
+    return all_candidates
+
+
 async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
     link_posts = await extract_posts_from_links(page)
     if link_posts:
@@ -674,18 +776,23 @@ async def run() -> None:
     seen_posts = load_seen_posts(config.SEEN_POSTS_FILE)
     all_candidates: list[Lead] = []
 
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=config.HEADLESS)
-        context = await browser.new_context(locale="id-ID", timezone_id="Asia/Jakarta")
-        page = await context.new_page()
+    if config.THREADS_ACCESS_TOKEN:
+        logger.info("THREADS_ACCESS_TOKEN is set. Using official Threads API keyword search.")
+        all_candidates = crawl_keywords_with_threads_api(keywords)
+    else:
+        logger.info("THREADS_ACCESS_TOKEN is empty. Using public web search via Playwright.")
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=config.HEADLESS)
+            context = await browser.new_context(locale="id-ID", timezone_id="Asia/Jakarta")
+            page = await context.new_page()
 
-        try:
-            for keyword in keywords:
-                all_candidates.extend(await crawl_keyword(page, keyword))
-                await page.wait_for_timeout(int(config.KEYWORD_DELAY_SECONDS * 1000))
-        finally:
-            await context.close()
-            await browser.close()
+            try:
+                for keyword in keywords:
+                    all_candidates.extend(await crawl_keyword(page, keyword))
+                    await page.wait_for_timeout(int(config.KEYWORD_DELAY_SECONDS * 1000))
+            finally:
+                await context.close()
+                await browser.close()
 
     new_leads = deduplicate_and_rank(all_candidates, seen_posts)
     seen_posts.update(lead.unique_id for lead in new_leads)

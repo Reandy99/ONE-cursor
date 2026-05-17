@@ -16,6 +16,17 @@ Crawler ini:
 
 Crawler ini tidak melakukan login otomatis, auto-DM, auto-comment, auto-like, captcha bypass, rate-limit bypass, atau pengambilan data private.
 
+## Kenapa hasil public web search bisa kosong?
+
+Threads public web search sering mengembalikan hasil default/top, bukan hasil terbaru yang lengkap. Untuk keyword panjang atau sangat spesifik, halaman publik juga bisa menampilkan login/empty state sehingga Playwright tidak menemukan post container.
+
+Untuk hasil yang lebih akurat dan benar-benar recent, gunakan opsi resmi Threads API Keyword Search dengan `THREADS_ACCESS_TOKEN`. API resmi mendukung:
+
+- `search_type=RECENT`
+- `since` dan `until`
+- `limit`
+- field detail seperti `timestamp`, `permalink`, `username`, dan `text`
+
 ## Struktur project
 
 ```text
@@ -79,6 +90,57 @@ Found X new leads
 ```
 
 Jika `N8N_WEBHOOK_URL` diisi, crawler juga akan mengirim hasil lead ke n8n setelah file JSON/CSV selesai ditulis.
+
+## Mode crawling yang tersedia
+
+### 1. Public web search dengan Playwright
+
+Ini mode default jika `THREADS_ACCESS_TOKEN` kosong:
+
+```bash
+python crawler.py
+```
+
+Kelebihan:
+
+- tidak butuh token,
+- tetap hanya membaca halaman publik.
+
+Keterbatasan:
+
+- Threads bisa menampilkan hasil top/lama,
+- beberapa keyword bisa memunculkan login/empty state,
+- web search publik tidak selalu menyediakan hasil recent yang akurat.
+
+### 2. Official Threads API Keyword Search
+
+Untuk hasil recent yang lebih akurat, set token resmi:
+
+```bash
+export THREADS_ACCESS_TOKEN="your_threads_access_token"
+python crawler.py
+```
+
+Crawler otomatis memakai endpoint resmi:
+
+```text
+https://graph.threads.net/v1.0/keyword_search
+```
+
+Parameter yang dipakai:
+
+- `search_type=RECENT`
+- `search_mode=KEYWORD`
+- `since` dan `until` sesuai `MAX_POST_AGE_HOURS`
+- `limit` sesuai `THREADS_API_LIMIT`
+- `fields=id,text,media_type,permalink,timestamp,username,has_replies,is_quote_post,is_reply`
+
+Token harus punya permission resmi:
+
+- `threads_basic`
+- `threads_keyword_search`
+
+Catatan: jika app belum approved untuk `threads_keyword_search`, API mungkin hanya mencari post milik user/token tersebut. Ikuti dokumentasi resmi Threads API untuk approval dan penggunaan token.
 
 ## Menjalankan 1x per hari
 
@@ -282,6 +344,10 @@ Beberapa nilai bisa dioverride dengan environment variable:
 | `MAX_LEADS` | `20` | Maksimal lead yang disimpan per run |
 | `N8N_WEBHOOK_URL` | kosong | URL Webhook n8n untuk menerima payload lead |
 | `N8N_REQUEST_TIMEOUT_SECONDS` | `15.0` | Timeout HTTP POST ke n8n |
+| `THREADS_ACCESS_TOKEN` | kosong | Token resmi Threads API; jika diisi crawler memakai API keyword search |
+| `THREADS_API_SEARCH_TYPE` | `RECENT` | Search type API, gunakan `RECENT` untuk hasil terbaru |
+| `THREADS_API_LIMIT` | `100` | Limit hasil API per keyword, maksimum 100 |
+| `THREADS_API_TIMEOUT_SECONDS` | `20.0` | Timeout request Threads API |
 | `REQUIRE_LOCATION_MATCH` | `true` | Hanya simpan post yang menyebut lokasi Jabodetabek |
 | `LOCATION_SCORE` | `3` | Tambahan skor jika post cocok dengan lokasi target |
 | `REQUIRE_RECENT_POSTS` | `true` | Hanya simpan post yang timestamp-nya masih baru |

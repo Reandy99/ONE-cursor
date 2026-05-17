@@ -18,6 +18,7 @@ JSON_OUTPUT_FILE = OUTPUT_DIR / "leads.json"
 CSV_OUTPUT_FILE = OUTPUT_DIR / "leads.csv"
 
 THREADS_SEARCH_URL = "https://www.threads.net/search"
+THREADS_API_KEYWORD_SEARCH_URL = "https://graph.threads.net/v1.0/keyword_search"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -56,6 +57,13 @@ MAX_LEADS = _env_int("MAX_LEADS", 20)
 # Optional n8n integration. Leave empty to only write local JSON/CSV files.
 N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
 N8N_REQUEST_TIMEOUT_SECONDS = _env_float("N8N_REQUEST_TIMEOUT_SECONDS", 15.0)
+
+# Optional official Threads API integration. If THREADS_ACCESS_TOKEN is present,
+# the crawler can request RECENT results with since/until filters.
+THREADS_ACCESS_TOKEN = os.getenv("THREADS_ACCESS_TOKEN", "").strip()
+THREADS_API_TIMEOUT_SECONDS = _env_float("THREADS_API_TIMEOUT_SECONDS", 20.0)
+THREADS_API_LIMIT = _env_int("THREADS_API_LIMIT", 100)
+THREADS_API_SEARCH_TYPE = os.getenv("THREADS_API_SEARCH_TYPE", "RECENT").strip().upper()
 
 # Browser/page behavior.
 PAGE_TIMEOUT_MS = _env_int("PAGE_TIMEOUT_MS", 30_000)

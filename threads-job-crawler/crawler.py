@@ -40,6 +40,7 @@ POST_CONTAINER_SELECTORS = [
     '[role="article"]',
     'div:has(a[href*="/post/"])',
 ]
+POST_LINK_SELECTOR = 'a[href*="/post/"]'
 
 ACCESS_RESTRICTION_HINTS = [
     "log in",
@@ -228,6 +229,66 @@ async def get_container_links(container: Any) -> list[dict[str, str]]:
     return cleaned_links
 
 
+async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
+    """Extract individual post candidates by starting from post permalinks.
+
+    Threads search markup changes often. In current public search pages, the
+    most stable signal is the permalink containing "/post/"; walking up to the
+    nearest parent with only one post link avoids collecting the whole results
+    column as a single lead.
+    """
+    try:
+        posts = await page.evaluate(
+            f"""() => {{
+                const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+                const anchors = Array.from(document.querySelectorAll({POST_LINK_SELECTOR!r}));
+                return anchors.map((anchor) => {{
+                    let bestNode = null;
+                    let fallbackNode = null;
+                    let node = anchor;
+
+                    for (let level = 0; node && level < 12; level += 1, node = node.parentElement) {{
+                        const text = normalize(node.innerText || node.textContent || "");
+                        if (text.length < 40) {{
+                            continue;
+                        }}
+
+                        const postLinkCount = node.querySelectorAll({POST_LINK_SELECTOR!r}).length;
+                        if (!fallbackNode || text.length < normalize(fallbackNode.innerText || fallbackNode.textContent || "").length) {{
+                            fallbackNode = node;
+                        }}
+
+                        if (postLinkCount <= 1) {{
+                            bestNode = node;
+                            break;
+                        }}
+                    }}
+
+                    const container = bestNode || fallbackNode || anchor;
+                    return {{
+                        href: anchor.href || anchor.getAttribute("href") || "",
+                        text: normalize(container.innerText || container.textContent || ""),
+                    }};
+                }}).filter((post) => post.text);
+            }}"""
+        )
+    except PlaywrightError as exc:
+        logger.debug("Post link extraction failed: %s", exc)
+        return []
+
+    cleaned_posts: list[dict[str, str]] = []
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+
+        text = normalize_text(str(post.get("text", "")))
+        post_url = normalize_post_url(str(post.get("href", "")))
+        if text and post_url:
+            cleaned_posts.append({"text": text, "post_url": post_url})
+
+    return cleaned_posts
+
+
 async def find_post_containers(page: Any) -> Any | None:
     for selector in POST_CONTAINER_SELECTORS:
         try:
@@ -266,6 +327,34 @@ async def scroll_page(page: Any) -> None:
 
 
 async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
+    link_posts = await extract_posts_from_links(page)
+    if link_posts:
+        logger.info("Found %s post permalink candidates for keyword %r.", len(link_posts), keyword)
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        leads: list[Lead] = []
+
+        for post in link_posts[: config.POST_EXTRACTION_LIMIT_PER_KEYWORD]:
+            text = post["text"]
+            score = calculate_lead_score(text)
+            if score < config.MIN_LEAD_SCORE:
+                continue
+
+            post_url = post["post_url"]
+            leads.append(
+                Lead(
+                    keyword=keyword,
+                    username=find_username([], post_url, text),
+                    text=text,
+                    post_url=post_url,
+                    scraped_at=scraped_at,
+                    lead_score=score,
+                    status="new",
+                    unique_id=make_unique_id(post_url, text),
+                )
+            )
+
+        return leads
+
     containers = await find_post_containers(page)
     if containers is None:
         logger.warning("No post containers found for keyword %r.", keyword)

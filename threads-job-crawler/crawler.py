@@ -71,10 +71,15 @@ ACCESS_RESTRICTION_HINTS = [
 CSV_FIELDS = [
     "keyword",
     "username",
+    "posted_at",
+    "post_age_hours",
     "text",
     "post_url",
     "scraped_at",
     "lead_score",
+    "matched_locations",
+    "matched_positive_keywords",
+    "matched_negative_keywords",
     "status",
 ]
 
@@ -83,10 +88,15 @@ CSV_FIELDS = [
 class Lead:
     keyword: str
     username: str
+    posted_at: str
+    post_age_hours: float | None
     text: str
     post_url: str
     scraped_at: str
     lead_score: int
+    matched_locations: list[str]
+    matched_positive_keywords: list[str]
+    matched_negative_keywords: list[str]
     status: str
     unique_id: str
 
@@ -94,12 +104,27 @@ class Lead:
         return {
             "keyword": self.keyword,
             "username": self.username,
+            "posted_at": self.posted_at,
+            "post_age_hours": self.post_age_hours,
             "text": self.text,
             "post_url": self.post_url,
             "scraped_at": self.scraped_at,
             "lead_score": self.lead_score,
+            "matched_locations": self.matched_locations,
+            "matched_positive_keywords": self.matched_positive_keywords,
+            "matched_negative_keywords": self.matched_negative_keywords,
             "status": self.status,
         }
+
+    def to_csv_dict(self) -> dict[str, Any]:
+        data = self.to_output_dict()
+        for field in (
+            "matched_locations",
+            "matched_positive_keywords",
+            "matched_negative_keywords",
+        ):
+            data[field] = "; ".join(data[field])
+        return data
 
 
 def load_keywords(path: Path) -> list[str]:
@@ -142,43 +167,56 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def calculate_lead_score(text: str) -> int:
+def find_matches(text: str, keywords: list[str]) -> list[str]:
     lowered = text.lower()
-    score = 0
+    return [keyword for keyword in keywords if keyword.lower() in lowered]
 
-    for keyword in config.POSITIVE_KEYWORDS:
-        if keyword.lower() in lowered:
-            score += config.POSITIVE_SCORE
 
-    for keyword in config.NEGATIVE_KEYWORDS:
-        if keyword.lower() in lowered:
-            score += config.NEGATIVE_SCORE
+def find_location_matches(text: str) -> list[str]:
+    return find_matches(text, config.LOCATION_KEYWORDS)
 
-    if has_location_match(text):
+
+def find_positive_matches(text: str) -> list[str]:
+    return find_matches(text, config.POSITIVE_KEYWORDS)
+
+
+def find_negative_matches(text: str) -> list[str]:
+    return find_matches(text, config.NEGATIVE_KEYWORDS)
+
+
+def calculate_lead_score(text: str) -> int:
+    positive_matches = find_positive_matches(text)
+    negative_matches = find_negative_matches(text)
+    location_matches = find_location_matches(text)
+
+    score = len(positive_matches) * config.POSITIVE_SCORE
+    score += len(negative_matches) * config.NEGATIVE_SCORE
+
+    if location_matches:
         score += config.LOCATION_SCORE
 
     return score
 
 
 def has_location_match(text: str) -> bool:
-    lowered = text.lower()
-    return any(keyword.lower() in lowered for keyword in config.LOCATION_KEYWORDS)
+    return bool(find_location_matches(text))
 
 
 def passes_location_filter(text: str) -> bool:
     return not config.REQUIRE_LOCATION_MATCH or has_location_match(text)
 
 
-def extract_post_age(text: str, now: datetime | None = None) -> timedelta | None:
+def extract_post_age(timestamp_text: str, now: datetime | None = None) -> timedelta | None:
     """Parse visible Threads timestamps into an approximate post age.
 
-    Public Threads search exposes timestamps as text such as "12 menit",
-    "3 jam", "1 hari", or sometimes a date. For strict freshness, date-only
-    posts are accepted only when ACCEPT_DATE_ONLY_CURRENT_DAY is enabled.
+    Public Threads search exposes timestamp links as text such as "12 menit",
+    "3 jam", "1 hari", or sometimes a date. Parsing only the timestamp label
+    avoids confusing event duration text ("4 jam kerja") with post age.
     """
     now = now or datetime.now(LOCAL_TZ)
-    lowered = text.lower()
-    timestamp_scope = lowered[:120]
+    timestamp_scope = timestamp_text.lower().strip()
+    if not timestamp_scope:
+        return None
 
     date_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", timestamp_scope)
     if date_match:
@@ -208,11 +246,23 @@ def extract_post_age(text: str, now: datetime | None = None) -> timedelta | None
     return None
 
 
-def passes_recency_filter(text: str, now: datetime | None = None) -> bool:
+def get_post_age(posted_at: str, text: str, now: datetime | None = None) -> timedelta | None:
+    if posted_at:
+        return extract_post_age(posted_at, now)
+    return extract_post_age(text[:120], now)
+
+
+def post_age_to_hours(age: timedelta | None) -> float | None:
+    if age is None:
+        return None
+    return round(age.total_seconds() / 3600, 2)
+
+
+def passes_recency_filter(posted_at: str, text: str, now: datetime | None = None) -> bool:
     if not config.REQUIRE_RECENT_POSTS:
         return True
 
-    age = extract_post_age(text, now)
+    age = get_post_age(posted_at, text, now)
     if age is None:
         return False
 
@@ -361,6 +411,7 @@ async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
                     const container = bestNode || fallbackNode || anchor;
                     return {{
                         href: anchor.href || anchor.getAttribute("href") || "",
+                        posted_at: normalize(anchor.innerText || anchor.textContent || ""),
                         text: normalize(container.innerText || container.textContent || ""),
                     }};
                 }}"""
@@ -371,28 +422,35 @@ async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
 
         posts.append(post)
 
-    merged_posts: dict[str, str] = {}
+    merged_posts: dict[str, dict[str, str]] = {}
     for post in posts:
         if not isinstance(post, dict):
             continue
 
         text = normalize_text(str(post.get("text", "")))
+        posted_at = normalize_text(str(post.get("posted_at", "")))
         post_url = normalize_post_url(str(post.get("href", "")))
         if not text or not post_url:
             continue
 
-        existing_text = merged_posts.get(post_url)
-        if existing_text is None:
-            merged_posts[post_url] = text
-        elif text not in existing_text:
+        existing_post = merged_posts.get(post_url)
+        if existing_post is None:
+            merged_posts[post_url] = {"text": text, "posted_at": posted_at}
+            continue
+
+        if posted_at and not existing_post["posted_at"]:
+            existing_post["posted_at"] = posted_at
+
+        existing_text = existing_post["text"]
+        if text not in existing_text:
             if existing_text in text:
-                merged_posts[post_url] = text
+                existing_post["text"] = text
             else:
-                merged_posts[post_url] = normalize_text(f"{existing_text} {text}")
+                existing_post["text"] = normalize_text(f"{existing_text} {text}")
 
     return [
-        {"text": text, "post_url": post_url}
-        for post_url, text in merged_posts.items()
+        {"text": post["text"], "posted_at": post["posted_at"], "post_url": post_url}
+        for post_url, post in merged_posts.items()
     ]
 
 
@@ -433,6 +491,25 @@ async def scroll_page(page: Any) -> None:
         logger.debug("Finished scroll %s/%s.", index + 1, config.SCROLL_COUNT)
 
 
+def build_lead(keyword: str, text: str, post_url: str, posted_at: str, scraped_at: str) -> Lead:
+    post_age = get_post_age(posted_at, text)
+    return Lead(
+        keyword=keyword,
+        username=find_username([], post_url, text),
+        posted_at=posted_at,
+        post_age_hours=post_age_to_hours(post_age),
+        text=text,
+        post_url=post_url,
+        scraped_at=scraped_at,
+        lead_score=calculate_lead_score(text),
+        matched_locations=find_location_matches(text),
+        matched_positive_keywords=find_positive_matches(text),
+        matched_negative_keywords=find_negative_matches(text),
+        status="new",
+        unique_id=make_unique_id(post_url, text),
+    )
+
+
 async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
     link_posts = await extract_posts_from_links(page)
     if link_posts:
@@ -445,7 +522,8 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
             if not passes_location_filter(text):
                 continue
 
-            if not passes_recency_filter(text):
+            posted_at = post.get("posted_at", "")
+            if not passes_recency_filter(posted_at, text):
                 continue
 
             score = calculate_lead_score(text)
@@ -453,18 +531,7 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
                 continue
 
             post_url = post["post_url"]
-            leads.append(
-                Lead(
-                    keyword=keyword,
-                    username=find_username([], post_url, text),
-                    text=text,
-                    post_url=post_url,
-                    scraped_at=scraped_at,
-                    lead_score=score,
-                    status="new",
-                    unique_id=make_unique_id(post_url, text),
-                )
-            )
+            leads.append(build_lead(keyword, text, post_url, posted_at, scraped_at))
 
         return leads
 
@@ -490,7 +557,7 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
         if not passes_location_filter(text):
             continue
 
-        if not passes_recency_filter(text):
+        if not passes_recency_filter("", text):
             continue
 
         score = calculate_lead_score(text)
@@ -499,20 +566,13 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
 
         links = await get_container_links(container)
         post_url = find_post_url(links)
-        username = find_username(links, post_url, text)
+        posted_at = ""
+        for link in links:
+            if normalize_post_url(link.get("href", "")) == post_url:
+                posted_at = link.get("text", "")
+                break
 
-        leads.append(
-            Lead(
-                keyword=keyword,
-                username=username,
-                text=text,
-                post_url=post_url,
-                scraped_at=scraped_at,
-                lead_score=score,
-                status="new",
-                unique_id=make_unique_id(post_url, text),
-            )
-        )
+        leads.append(build_lead(keyword, text, post_url, posted_at, scraped_at))
 
     return leads
 
@@ -567,7 +627,7 @@ def write_csv(path: Path, leads: list[Lead]) -> None:
         writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
         writer.writeheader()
         for lead in leads:
-            writer.writerow(lead.to_output_dict())
+            writer.writerow(lead.to_csv_dict())
 
 
 def send_to_n8n(leads: list[Lead]) -> None:

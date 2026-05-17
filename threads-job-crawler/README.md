@@ -56,6 +56,21 @@ Output akan ditulis ke:
 - `output/leads.json`
 - `output/leads.csv`
 
+Field utama output:
+
+- `keyword`: keyword search yang menghasilkan lead
+- `username`: username Threads jika bisa ditemukan
+- `posted_at`: timestamp yang terlihat di Threads, misalnya `1 jam`, `3 hari`, atau tanggal
+- `post_age_hours`: estimasi umur post dalam jam jika timestamp bisa diparse
+- `text`: teks post yang terlihat di halaman
+- `post_url`: permalink post
+- `scraped_at`: waktu crawler mengambil data
+- `lead_score`: skor lead
+- `matched_locations`: lokasi target yang cocok, misalnya `jakarta` atau `jabodetabek`
+- `matched_positive_keywords`: keyword positif yang ditemukan
+- `matched_negative_keywords`: keyword negatif yang ditemukan
+- `status`: default `new`
+
 Terminal juga akan menampilkan ringkasan:
 
 ```text
@@ -102,7 +117,22 @@ Payload yang dikirim ke n8n:
   "scraped_at": "2026-05-17T08:00:00+00:00",
   "source": "threads",
   "total_leads": 20,
-  "leads": []
+  "leads": [
+    {
+      "keyword": "photographer jakarta",
+      "username": "contoh_user",
+      "posted_at": "2 jam",
+      "post_age_hours": 2.0,
+      "text": "Butuh photographer event di Jakarta...",
+      "post_url": "https://www.threads.com/@contoh_user/post/POST_ID",
+      "scraped_at": "2026-05-17T08:00:00+00:00",
+      "lead_score": 9,
+      "matched_locations": ["jakarta"],
+      "matched_positive_keywords": ["butuh", "event", "photographer"],
+      "matched_negative_keywords": [],
+      "status": "new"
+    }
+  ]
 }
 ```
 
@@ -172,7 +202,7 @@ Post yang cocok dengan lokasi mendapat tambahan skor `LOCATION_SCORE`, default `
 
 ## Filter waktu terbaru
 
-Secara default crawler hanya menyimpan post yang timestamp-nya terlihat sebagai post baru, misalnya:
+Secara default crawler hanya menyimpan post yang timestamp link-nya terlihat sebagai post baru, misalnya:
 
 - `baru saja`
 - `12 menit`
@@ -190,7 +220,7 @@ Kalau ingin lebih ketat, misalnya hanya 3 jam terakhir:
 MAX_POST_AGE_HOURS=3 python crawler.py
 ```
 
-Crawler akan menolak post seperti `1 hari`, `2 hari`, atau tanggal lama. Untuk menjaga data tetap fresh, post yang hanya menampilkan tanggal tanpa jam/menit juga ditolak secara default karena tidak bisa dipastikan masuk 3-5 jam terakhir.
+Crawler membaca umur post dari timestamp link Threads, bukan dari seluruh teks post. Ini mencegah salah baca durasi event seperti `2 jam kerja` sebagai umur post. Crawler akan menolak post seperti `1 hari`, `2 hari`, atau tanggal lama. Untuk menjaga data tetap fresh, post yang hanya menampilkan tanggal tanpa jam/menit juga ditolak secara default karena tidak bisa dipastikan masuk 3-5 jam terakhir.
 
 Kalau Anda ingin menerima post bertanggal hari ini walaupun Threads tidak menampilkan jam, set:
 

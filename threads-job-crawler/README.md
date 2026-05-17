@@ -9,6 +9,7 @@ Crawler ini:
 - membaca data yang terlihat di halaman,
 - memberi skor lead sederhana,
 - memfilter hasil agar default-nya hanya menyimpan post dengan sinyal lokasi Jabodetabek,
+- memfilter hasil agar default-nya hanya menyimpan post terbaru dalam beberapa jam terakhir,
 - menghindari duplikasi memakai `seen_posts.json`,
 - menulis hasil ke JSON dan CSV,
 - mengirim payload JSON ke n8n Webhook jika `N8N_WEBHOOK_URL` diisi.
@@ -169,6 +170,40 @@ REQUIRE_LOCATION_MATCH=false python crawler.py
 
 Post yang cocok dengan lokasi mendapat tambahan skor `LOCATION_SCORE`, default `+3`.
 
+## Filter waktu terbaru
+
+Secara default crawler hanya menyimpan post yang timestamp-nya terlihat sebagai post baru, misalnya:
+
+- `baru saja`
+- `12 menit`
+- `3 jam`
+
+Default batas waktu adalah 5 jam terakhir:
+
+```bash
+MAX_POST_AGE_HOURS=5 python crawler.py
+```
+
+Kalau ingin lebih ketat, misalnya hanya 3 jam terakhir:
+
+```bash
+MAX_POST_AGE_HOURS=3 python crawler.py
+```
+
+Crawler akan menolak post seperti `1 hari`, `2 hari`, atau tanggal lama. Untuk menjaga data tetap fresh, post yang hanya menampilkan tanggal tanpa jam/menit juga ditolak secara default karena tidak bisa dipastikan masuk 3-5 jam terakhir.
+
+Kalau Anda ingin menerima post bertanggal hari ini walaupun Threads tidak menampilkan jam, set:
+
+```bash
+ACCEPT_DATE_ONLY_CURRENT_DAY=true python crawler.py
+```
+
+Kalau ingin mematikan filter waktu:
+
+```bash
+REQUIRE_RECENT_POSTS=false python crawler.py
+```
+
 ## Cara mengubah jumlah post maksimal
 
 Default maksimal output adalah 20 lead per run. Anda bisa mengubahnya di `config.py`:
@@ -215,6 +250,10 @@ Beberapa nilai bisa dioverride dengan environment variable:
 | `N8N_REQUEST_TIMEOUT_SECONDS` | `15.0` | Timeout HTTP POST ke n8n |
 | `REQUIRE_LOCATION_MATCH` | `true` | Hanya simpan post yang menyebut lokasi Jabodetabek |
 | `LOCATION_SCORE` | `3` | Tambahan skor jika post cocok dengan lokasi target |
+| `REQUIRE_RECENT_POSTS` | `true` | Hanya simpan post yang timestamp-nya masih baru |
+| `MAX_POST_AGE_HOURS` | `5.0` | Batas umur post maksimal dalam jam |
+| `ACCEPT_DATE_ONLY_CURRENT_DAY` | `false` | Terima post bertanggal hari ini walau tanpa jam/menit |
+| `LOCAL_TIMEZONE` | `Asia/Jakarta` | Timezone lokal untuk pengecekan tanggal hari ini |
 | `SCROLL_COUNT` | `5` | Jumlah scroll per keyword |
 | `SCROLL_DELAY_SECONDS` | `2.0` | Delay antar scroll |
 | `KEYWORD_DELAY_SECONDS` | `2.0` | Delay antar keyword |

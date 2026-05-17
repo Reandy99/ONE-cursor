@@ -12,10 +12,11 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from playwright.async_api import (
@@ -41,6 +42,20 @@ POST_CONTAINER_SELECTORS = [
     'div:has(a[href*="/post/"])',
 ]
 POST_LINK_SELECTOR = 'a[href*="/post/"]'
+
+
+def get_local_timezone() -> ZoneInfo:
+    try:
+        return ZoneInfo(config.LOCAL_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Unknown LOCAL_TIMEZONE=%r. Falling back to Asia/Jakarta.",
+            config.LOCAL_TIMEZONE,
+        )
+        return ZoneInfo("Asia/Jakarta")
+
+
+LOCAL_TZ = get_local_timezone()
 
 ACCESS_RESTRICTION_HINTS = [
     "log in",
@@ -152,6 +167,51 @@ def has_location_match(text: str) -> bool:
 
 def passes_location_filter(text: str) -> bool:
     return not config.REQUIRE_LOCATION_MATCH or has_location_match(text)
+
+
+def extract_post_age(text: str, now: datetime | None = None) -> timedelta | None:
+    """Parse visible Threads timestamps into an approximate post age.
+
+    Public Threads search exposes timestamps as text such as "12 menit",
+    "3 jam", "1 hari", or sometimes a date. For strict freshness, date-only
+    posts are accepted only when ACCEPT_DATE_ONLY_CURRENT_DAY is enabled.
+    """
+    now = now or datetime.now(LOCAL_TZ)
+    lowered = text.lower()
+
+    if any(marker in lowered for marker in ("baru saja", "just now", "seconds ago")):
+        return timedelta(seconds=0)
+
+    minute_match = re.search(r"\b(\d+)\s*(menit|mnt|min|mins|minute|minutes)\b", lowered)
+    if minute_match:
+        return timedelta(minutes=int(minute_match.group(1)))
+
+    hour_match = re.search(r"\b(\d+)\s*(jam|hour|hours|hr|hrs|h)\b", lowered)
+    if hour_match:
+        return timedelta(hours=int(hour_match.group(1)))
+
+    day_match = re.search(r"\b(\d+)\s*(hari|day|days|d)\b", lowered)
+    if day_match or "kemarin" in lowered or "yesterday" in lowered:
+        return timedelta(days=1)
+
+    date_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", lowered)
+    if date_match and config.ACCEPT_DATE_ONLY_CURRENT_DAY:
+        day, month, year = (int(part) for part in date_match.groups())
+        if now.date() == datetime(year, month, day, tzinfo=LOCAL_TZ).date():
+            return timedelta(seconds=0)
+
+    return None
+
+
+def passes_recency_filter(text: str, now: datetime | None = None) -> bool:
+    if not config.REQUIRE_RECENT_POSTS:
+        return True
+
+    age = extract_post_age(text, now)
+    if age is None:
+        return False
+
+    return timedelta(seconds=0) <= age <= timedelta(hours=config.MAX_POST_AGE_HOURS)
 
 
 def normalize_post_url(url: str) -> str:
@@ -368,6 +428,9 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
             if not passes_location_filter(text):
                 continue
 
+            if not passes_recency_filter(text):
+                continue
+
             score = calculate_lead_score(text)
             if score < config.MIN_LEAD_SCORE:
                 continue
@@ -408,6 +471,9 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
             continue
 
         if not passes_location_filter(text):
+            continue
+
+        if not passes_recency_filter(text):
             continue
 
         score = calculate_lead_score(text)

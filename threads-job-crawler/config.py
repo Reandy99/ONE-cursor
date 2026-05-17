@@ -9,6 +9,7 @@ import os
 
 
 BASE_DIR = Path(__file__).resolve().parent
+LOCAL_TIMEZONE = os.getenv("LOCAL_TIMEZONE", "Asia/Jakarta")
 
 KEYWORDS_FILE = BASE_DIR / "keywords.txt"
 SEEN_POSTS_FILE = BASE_DIR / "seen_posts.json"
@@ -69,6 +70,12 @@ POSITIVE_SCORE = 2
 NEGATIVE_SCORE = -3
 LOCATION_SCORE = _env_int("LOCATION_SCORE", 3)
 REQUIRE_LOCATION_MATCH = _env_bool("REQUIRE_LOCATION_MATCH", True)
+REQUIRE_RECENT_POSTS = _env_bool("REQUIRE_RECENT_POSTS", True)
+MAX_POST_AGE_HOURS = _env_float("MAX_POST_AGE_HOURS", 5.0)
+
+# Keep this false for strict "last few hours" filtering. Set true only if you
+# want to accept date-only posts from today's date even when Threads hides time.
+ACCEPT_DATE_ONLY_CURRENT_DAY = _env_bool("ACCEPT_DATE_ONLY_CURRENT_DAY", False)
 
 POSITIVE_KEYWORDS = [
     "butuh",

@@ -163,8 +163,15 @@ def normalize_post_url(url: str) -> str:
     if not any(domain in parsed.netloc for domain in ("threads.net", "threads.com")):
         return ""
 
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "post" in path_parts:
+        post_index = path_parts.index("post")
+        if len(path_parts) > post_index + 1:
+            path_parts = path_parts[: post_index + 2]
+
     # Drop query/fragment values so the same post does not appear as duplicates.
-    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", "", ""))
+    canonical_path = "/" + "/".join(path_parts)
+    return urlunparse((parsed.scheme, parsed.netloc, canonical_path.rstrip("/"), "", "", ""))
 
 
 def make_unique_id(post_url: str, text: str) -> str:

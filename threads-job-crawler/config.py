@@ -52,6 +52,10 @@ HEADLESS = _env_bool("THREADS_HEADLESS", True)
 # Maximum exported leads per run/day.
 MAX_LEADS = _env_int("MAX_LEADS", 20)
 
+# Optional n8n integration. Leave empty to only write local JSON/CSV files.
+N8N_WEBHOOK_URL = os.getenv("N8N_WEBHOOK_URL", "").strip()
+N8N_REQUEST_TIMEOUT_SECONDS = _env_float("N8N_REQUEST_TIMEOUT_SECONDS", 15.0)
+
 # Browser/page behavior.
 PAGE_TIMEOUT_MS = _env_int("PAGE_TIMEOUT_MS", 30_000)
 SCROLL_COUNT = _env_int("SCROLL_COUNT", 5)

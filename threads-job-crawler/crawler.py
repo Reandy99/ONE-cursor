@@ -17,11 +17,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
+import requests
 from playwright.async_api import (
     Error as PlaywrightError,
     TimeoutError as PlaywrightTimeoutError,
     async_playwright,
 )
+from requests import RequestException
 
 import config
 
@@ -360,6 +362,31 @@ def write_csv(path: Path, leads: list[Lead]) -> None:
             writer.writerow(lead.to_output_dict())
 
 
+def send_to_n8n(leads: list[Lead]) -> None:
+    """Send exported leads to n8n when N8N_WEBHOOK_URL is configured."""
+    if not config.N8N_WEBHOOK_URL:
+        logger.info("N8N_WEBHOOK_URL is empty. Skipping n8n webhook.")
+        return
+
+    payload = {
+        "scraped_at": datetime.now(timezone.utc).isoformat(),
+        "source": "threads",
+        "total_leads": len(leads),
+        "leads": [lead.to_output_dict() for lead in leads],
+    }
+
+    try:
+        response = requests.post(
+            config.N8N_WEBHOOK_URL,
+            json=payload,
+            timeout=config.N8N_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        logger.info("Sent %s leads to n8n webhook.", len(leads))
+    except RequestException as exc:
+        logger.error("Failed to send leads to n8n webhook: %s", exc)
+
+
 def print_summary(leads: list[Lead]) -> None:
     print(f"Found {len(leads)} new leads")
 
@@ -398,6 +425,7 @@ async def run() -> None:
     write_json(config.JSON_OUTPUT_FILE, new_leads)
     write_csv(config.CSV_OUTPUT_FILE, new_leads)
     save_seen_posts(config.SEEN_POSTS_FILE, seen_posts)
+    send_to_n8n(new_leads)
     print_summary(new_leads)
 
 

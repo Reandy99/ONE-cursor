@@ -9,7 +9,8 @@ Crawler ini:
 - membaca data yang terlihat di halaman,
 - memberi skor lead sederhana,
 - menghindari duplikasi memakai `seen_posts.json`,
-- menulis hasil ke JSON dan CSV.
+- menulis hasil ke JSON dan CSV,
+- mengirim payload JSON ke n8n Webhook jika `N8N_WEBHOOK_URL` diisi.
 
 Crawler ini tidak melakukan login otomatis, auto-DM, auto-comment, auto-like, captcha bypass, rate-limit bypass, atau pengambilan data private.
 
@@ -60,6 +61,8 @@ Found X new leads
 1. score=... | ...
 ```
 
+Jika `N8N_WEBHOOK_URL` diisi, crawler juga akan mengirim hasil lead ke n8n setelah file JSON/CSV selesai ditulis.
+
 ## Menjalankan 1x per hari
 
 Contoh cron untuk menjalankan setiap hari jam 08.00:
@@ -69,6 +72,59 @@ Contoh cron untuk menjalankan setiap hari jam 08.00:
 ```
 
 Sesuaikan path dengan lokasi project di mesin Anda.
+
+## Integrasi n8n Webhook
+
+Crawler membaca URL Webhook n8n dari environment variable:
+
+```bash
+export N8N_WEBHOOK_URL="https://your-n8n-domain/webhook/threads-leads"
+python crawler.py
+```
+
+Atau jalankan dalam satu command:
+
+```bash
+N8N_WEBHOOK_URL="https://your-n8n-domain/webhook/threads-leads" python crawler.py
+```
+
+Jika `N8N_WEBHOOK_URL` kosong, crawler tetap berjalan normal dan hanya menyimpan:
+
+- `output/leads.json`
+- `output/leads.csv`
+
+Payload yang dikirim ke n8n:
+
+```json
+{
+  "scraped_at": "2026-05-17T08:00:00+00:00",
+  "source": "threads",
+  "total_leads": 20,
+  "leads": []
+}
+```
+
+Contoh workflow n8n:
+
+```text
+Schedule Trigger -> Execute Command / Webhook -> Google Sheets -> Telegram
+```
+
+Penjelasan praktis:
+
+1. `Schedule Trigger`: jalankan workflow setiap hari, misalnya jam 08.00.
+2. `Execute Command`: jalankan crawler di server yang memiliki project ini.
+   Contoh command:
+
+   ```bash
+   cd /path/to/threads-job-crawler && N8N_WEBHOOK_URL="https://your-n8n-domain/webhook/threads-leads" .venv/bin/python crawler.py
+   ```
+
+3. `Webhook`: terima HTTP POST JSON dari crawler.
+4. `Google Sheets`: simpan setiap item dari `leads` sebagai baris baru.
+5. `Telegram`: kirim ringkasan, misalnya `total_leads` dan beberapa lead dengan skor tertinggi.
+
+Catatan: pada beberapa setup, `Execute Command` dipakai untuk menjalankan crawler, sedangkan `Webhook` berada di workflow lain untuk menerima payload dari crawler.
 
 ## Cara mengubah keyword
 
@@ -124,6 +180,8 @@ Beberapa nilai bisa dioverride dengan environment variable:
 | --- | --- | --- |
 | `THREADS_HEADLESS` | `true` | `false` untuk membuka browser terlihat |
 | `MAX_LEADS` | `20` | Maksimal lead yang disimpan per run |
+| `N8N_WEBHOOK_URL` | kosong | URL Webhook n8n untuk menerima payload lead |
+| `N8N_REQUEST_TIMEOUT_SECONDS` | `15.0` | Timeout HTTP POST ke n8n |
 | `SCROLL_COUNT` | `5` | Jumlah scroll per keyword |
 | `SCROLL_DELAY_SECONDS` | `2.0` | Delay antar scroll |
 | `KEYWORD_DELAY_SECONDS` | `2.0` | Delay antar keyword |

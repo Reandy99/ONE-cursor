@@ -165,7 +165,11 @@ Edit `keywords.txt`, satu keyword per baris:
 ```text
 butuh photographer jakarta
 cari fotografer jabodetabek
-dokumentasi event bekasi
+photographer event jakarta
+cari photographer tangerang
+cari fotografer bekasi
+cari fotografer depok
+cari fotografer bogor
 ```
 
 Baris kosong akan diabaikan. Baris yang diawali `#` juga akan diabaikan.

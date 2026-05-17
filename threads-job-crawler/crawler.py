@@ -203,7 +203,7 @@ def extract_post_age(text: str, now: datetime | None = None) -> timedelta | None
 
     day_match = re.search(r"\b(\d+)\s*(hari|day|days|d)\b", timestamp_scope)
     if day_match or "kemarin" in timestamp_scope or "yesterday" in timestamp_scope:
-        return timedelta(days=1)
+        return timedelta(days=int(day_match.group(1)) if day_match else 1)
 
     return None
 
@@ -371,17 +371,29 @@ async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
 
         posts.append(post)
 
-    cleaned_posts: list[dict[str, str]] = []
+    merged_posts: dict[str, str] = {}
     for post in posts:
         if not isinstance(post, dict):
             continue
 
         text = normalize_text(str(post.get("text", "")))
         post_url = normalize_post_url(str(post.get("href", "")))
-        if text and post_url:
-            cleaned_posts.append({"text": text, "post_url": post_url})
+        if not text or not post_url:
+            continue
 
-    return cleaned_posts
+        existing_text = merged_posts.get(post_url)
+        if existing_text is None:
+            merged_posts[post_url] = text
+        elif text not in existing_text:
+            if existing_text in text:
+                merged_posts[post_url] = text
+            else:
+                merged_posts[post_url] = normalize_text(f"{existing_text} {text}")
+
+    return [
+        {"text": text, "post_url": post_url}
+        for post_url, text in merged_posts.items()
+    ]
 
 
 async def find_post_containers(page: Any) -> Any | None:

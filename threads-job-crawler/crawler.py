@@ -148,7 +148,7 @@ def normalize_post_url(url: str) -> str:
 
     absolute_url = urljoin("https://www.threads.net", url)
     parsed = urlparse(absolute_url)
-    if "threads.net" not in parsed.netloc:
+    if not any(domain in parsed.netloc for domain in ("threads.net", "threads.com")):
         return ""
 
     # Drop query/fragment values so the same post does not appear as duplicates.
@@ -237,12 +237,22 @@ async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
     nearest parent with only one post link avoids collecting the whole results
     column as a single lead.
     """
+    anchors = page.locator(POST_LINK_SELECTOR)
     try:
-        posts = await page.evaluate(
-            f"""() => {{
-                const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
-                const anchors = Array.from(document.querySelectorAll({POST_LINK_SELECTOR!r}));
-                return anchors.map((anchor) => {{
+        anchor_count = min(
+            await anchors.count(),
+            config.POST_EXTRACTION_LIMIT_PER_KEYWORD,
+        )
+    except PlaywrightError as exc:
+        logger.debug("Post link count failed: %s", exc)
+        return []
+
+    posts: list[dict[str, str]] = []
+    for index in range(anchor_count):
+        try:
+            post = await anchors.nth(index).evaluate(
+                f"""(anchor) => {{
+                    const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
                     let bestNode = null;
                     let fallbackNode = null;
                     let node = anchor;
@@ -269,12 +279,13 @@ async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
                         href: anchor.href || anchor.getAttribute("href") || "",
                         text: normalize(container.innerText || container.textContent || ""),
                     }};
-                }}).filter((post) => post.text);
-            }}"""
-        )
-    except PlaywrightError as exc:
-        logger.debug("Post link extraction failed: %s", exc)
-        return []
+                }}"""
+            )
+        except PlaywrightError as exc:
+            logger.debug("Post link extraction failed at index %s: %s", index, exc)
+            continue
+
+        posts.append(post)
 
     cleaned_posts: list[dict[str, str]] = []
     for post in posts:

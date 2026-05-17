@@ -139,7 +139,19 @@ def calculate_lead_score(text: str) -> int:
         if keyword.lower() in lowered:
             score += config.NEGATIVE_SCORE
 
+    if has_location_match(text):
+        score += config.LOCATION_SCORE
+
     return score
+
+
+def has_location_match(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword.lower() in lowered for keyword in config.LOCATION_KEYWORDS)
+
+
+def passes_location_filter(text: str) -> bool:
+    return not config.REQUIRE_LOCATION_MATCH or has_location_match(text)
 
 
 def normalize_post_url(url: str) -> str:
@@ -346,6 +358,9 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
 
         for post in link_posts[: config.POST_EXTRACTION_LIMIT_PER_KEYWORD]:
             text = post["text"]
+            if not passes_location_filter(text):
+                continue
+
             score = calculate_lead_score(text)
             if score < config.MIN_LEAD_SCORE:
                 continue
@@ -383,6 +398,9 @@ async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
         container = containers.nth(index)
         text = await get_container_text(container)
         if not text:
+            continue
+
+        if not passes_location_filter(text):
             continue
 
         score = calculate_lead_score(text)

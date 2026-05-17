@@ -67,6 +67,8 @@ POST_EXTRACTION_LIMIT_PER_KEYWORD = _env_int("POST_EXTRACTION_LIMIT_PER_KEYWORD"
 MIN_LEAD_SCORE = _env_int("MIN_LEAD_SCORE", 4)
 POSITIVE_SCORE = 2
 NEGATIVE_SCORE = -3
+LOCATION_SCORE = _env_int("LOCATION_SCORE", 3)
+REQUIRE_LOCATION_MATCH = _env_bool("REQUIRE_LOCATION_MATCH", True)
 
 POSITIVE_KEYWORDS = [
     "butuh",
@@ -101,4 +103,43 @@ NEGATIVE_KEYWORDS = [
     "open jasa",
     "promo jasa",
     "kelas fotografi",
+]
+
+# Default MVP focus is Jabodetabek. Add/remove terms based on your market.
+LOCATION_KEYWORDS = [
+    "jabodetabek",
+    "jakarta",
+    "dki jakarta",
+    "jaksel",
+    "jakarta selatan",
+    "jakbar",
+    "jakarta barat",
+    "jakpus",
+    "jakarta pusat",
+    "jakut",
+    "jakarta utara",
+    "jaktim",
+    "jakarta timur",
+    "bogor",
+    "depok",
+    "tangerang",
+    "tangerang selatan",
+    "tangsel",
+    "bekasi",
+    "bsd",
+    "serpong",
+    "gading serpong",
+    "alam sutera",
+    "karawaci",
+    "bintaro",
+    "cibubur",
+    "sentul",
+    "cibinong",
+    "kelapa gading",
+    "kemang",
+    "scbd",
+    "sudirman",
+    "thamrin",
+    "kuningan",
+    "senayan",
 ]

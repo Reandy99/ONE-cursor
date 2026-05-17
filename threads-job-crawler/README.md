@@ -1,6 +1,6 @@
 # Threads Job Crawler
 
-MVP Python untuk mencari lead photographer/videographer dari postingan publik Threads berdasarkan keyword tertentu.
+MVP Python untuk mencari lead photographer/videographer dari postingan publik Threads berdasarkan keyword tertentu, dengan fokus default ke area Jabodetabek.
 
 Crawler ini:
 
@@ -8,6 +8,7 @@ Crawler ini:
 - melakukan scroll dengan delay,
 - membaca data yang terlihat di halaman,
 - memberi skor lead sederhana,
+- memfilter hasil agar default-nya hanya menyimpan post dengan sinyal lokasi Jabodetabek,
 - menghindari duplikasi memakai `seen_posts.json`,
 - menulis hasil ke JSON dan CSV,
 - mengirim payload JSON ke n8n Webhook jika `N8N_WEBHOOK_URL` diisi.
@@ -131,12 +132,42 @@ Catatan: pada beberapa setup, `Execute Command` dipakai untuk menjalankan crawle
 Edit `keywords.txt`, satu keyword per baris:
 
 ```text
-butuh photographer
-cari fotografer
-dokumentasi event
+butuh photographer jakarta
+cari fotografer jabodetabek
+dokumentasi event bekasi
 ```
 
 Baris kosong akan diabaikan. Baris yang diawali `#` juga akan diabaikan.
+
+## Fokus lokasi Jabodetabek
+
+Secara default crawler hanya menyimpan post yang mengandung salah satu sinyal lokasi di `LOCATION_KEYWORDS`, misalnya:
+
+- `jabodetabek`
+- `jakarta`, `jaksel`, `jakbar`, `jakpus`, `jakut`, `jaktim`
+- `bogor`
+- `depok`
+- `tangerang`, `tangerang selatan`, `tangsel`
+- `bekasi`
+- area populer seperti `bsd`, `serpong`, `alam sutera`, `bintaro`, `cibubur`, `sentul`, `kemang`, `scbd`, dan lainnya
+
+Daftar lengkap bisa diedit di `config.py`:
+
+```python
+LOCATION_KEYWORDS = [
+    "jabodetabek",
+    "jakarta",
+    "bekasi",
+]
+```
+
+Kalau ingin crawler kembali menerima hasil global, set:
+
+```bash
+REQUIRE_LOCATION_MATCH=false python crawler.py
+```
+
+Post yang cocok dengan lokasi mendapat tambahan skor `LOCATION_SCORE`, default `+3`.
 
 ## Cara mengubah jumlah post maksimal
 
@@ -182,6 +213,8 @@ Beberapa nilai bisa dioverride dengan environment variable:
 | `MAX_LEADS` | `20` | Maksimal lead yang disimpan per run |
 | `N8N_WEBHOOK_URL` | kosong | URL Webhook n8n untuk menerima payload lead |
 | `N8N_REQUEST_TIMEOUT_SECONDS` | `15.0` | Timeout HTTP POST ke n8n |
+| `REQUIRE_LOCATION_MATCH` | `true` | Hanya simpan post yang menyebut lokasi Jabodetabek |
+| `LOCATION_SCORE` | `3` | Tambahan skor jika post cocok dengan lokasi target |
 | `SCROLL_COUNT` | `5` | Jumlah scroll per keyword |
 | `SCROLL_DELAY_SECONDS` | `2.0` | Delay antar scroll |
 | `KEYWORD_DELAY_SECONDS` | `2.0` | Delay antar keyword |
@@ -196,6 +229,7 @@ Crawler memberi skor berdasarkan teks postingan:
 
 - `+2` untuk setiap positive keyword yang muncul.
 - `-3` untuk setiap negative keyword yang muncul.
+- `+3` jika post mengandung sinyal lokasi Jabodetabek.
 - Hanya post dengan skor `>= 4` yang disimpan.
 - Hasil diurutkan dari skor tertinggi.
 - Maksimal output mengikuti `MAX_LEADS`.

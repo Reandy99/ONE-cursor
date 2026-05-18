@@ -2,14 +2,20 @@ import { Inter_400Regular, Inter_500Medium, Inter_700Bold, useFonts as useInterF
 import { Outfit_500Medium, Outfit_700Bold, useFonts as useOutfitFonts } from '@expo-google-fonts/outfit';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { Colors } from '@/constants/tokens';
+import { useMoodStore } from '@/store/moodStore';
 
 export default function RootLayout() {
   const [interLoaded] = useInterFonts({ Inter_400Regular, Inter_500Medium, Inter_700Bold });
   const [outfitLoaded] = useOutfitFonts({ Outfit_500Medium, Outfit_700Bold });
+
+  useEffect(() => {
+    void useMoodStore.getState().hydrate();
+  }, []);
 
   if (!interLoaded || !outfitLoaded) {
     return (

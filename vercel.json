@@ -1,0 +1,10 @@
+{
+  "buildCommand": "cd BoneyAI && npm run build:web",
+  "outputDirectory": "BoneyAI/dist",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

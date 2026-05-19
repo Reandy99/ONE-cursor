@@ -1,4 +1,5 @@
 {
+  "installCommand": "cd BoneyAI && npm install",
   "buildCommand": "cd BoneyAI && npm run build:web",
   "outputDirectory": "BoneyAI/dist",
   "rewrites": [

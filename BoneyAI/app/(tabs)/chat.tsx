@@ -1,6 +1,6 @@
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -21,9 +21,13 @@ export default function ChatScreen() {
   const [text, setText] = useState('');
   const { messages, mode, isThinking, sendMessage, setMode } = useChatStore();
 
+  const scrollToBottom = useCallback(() => {
+    scrollRef.current?.scrollToEnd({ animated: Platform.OS !== 'web' });
+  }, []);
+
   useEffect(() => {
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
-  }, [messages.length, isThinking]);
+    scrollToBottom();
+  }, [messages.length, isThinking, scrollToBottom]);
 
   const submit = async () => {
     const value = text;
@@ -47,7 +51,7 @@ export default function ChatScreen() {
         </View>
       </View>
 
-      <ScrollView ref={scrollRef} contentContainerStyle={styles.messages} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollRef} contentContainerStyle={styles.messages} onContentSizeChange={scrollToBottom} showsVerticalScrollIndicator={false}>
         {messages.map((message) => (
           <ChatBubble key={message.id} role={message.role} text={message.text} mode={message.mode} />
         ))}

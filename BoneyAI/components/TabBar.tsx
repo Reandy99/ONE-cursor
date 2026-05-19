@@ -16,46 +16,54 @@ export function TabBar({ state, descriptors, navigation }: BottomTabBarProps) {
     return null;
   }
 
+  const bar = (
+    <View style={styles.bar}>
+      {state.routes.map((route, index) => {
+        const isFocused = state.index === index;
+        const isMood = route.name === 'mood';
+        const title = descriptors[route.key].options.title ?? route.name;
+
+        const onPress = () => {
+          const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
+          if (!isFocused && !event.defaultPrevented) {
+            navigation.navigate(route.name, route.params);
+          }
+        };
+
+        return (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={isFocused ? { selected: true } : {}}
+            accessibilityLabel={descriptors[route.key].options.tabBarAccessibilityLabel}
+            key={route.key}
+            onPress={onPress}
+            style={[styles.item, isMood && styles.moodItem]}
+          >
+            {isMood ? (
+              <LinearGradient colors={Colors.gradHero as [string, string]} style={styles.primaryButton}>
+                <Text style={styles.primaryIcon}>+</Text>
+              </LinearGradient>
+            ) : (
+              <>
+                <Text style={[styles.icon, { color: isFocused ? Colors.primary : Colors.mute }]}>{icons[route.name]}</Text>
+                <Text style={[styles.label, { color: isFocused ? Colors.primary : Colors.mute }]}>{String(title)}</Text>
+              </>
+            )}
+          </Pressable>
+        );
+      })}
+    </View>
+  );
+
   return (
     <View pointerEvents="box-none" style={[styles.shell, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-      <BlurView intensity={Platform.OS === 'ios' ? 36 : 0} tint="light" style={styles.blur}>
-        <View style={styles.bar}>
-          {state.routes.map((route, index) => {
-            const isFocused = state.index === index;
-            const isMood = route.name === 'mood';
-            const title = descriptors[route.key].options.title ?? route.name;
-
-            const onPress = () => {
-              const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
-              if (!isFocused && !event.defaultPrevented) {
-                navigation.navigate(route.name, route.params);
-              }
-            };
-
-            return (
-              <Pressable
-                accessibilityRole="button"
-                accessibilityState={isFocused ? { selected: true } : {}}
-                accessibilityLabel={descriptors[route.key].options.tabBarAccessibilityLabel}
-                key={route.key}
-                onPress={onPress}
-                style={[styles.item, isMood && styles.moodItem]}
-              >
-                {isMood ? (
-                  <LinearGradient colors={Colors.gradHero as [string, string]} style={styles.primaryButton}>
-                    <Text style={styles.primaryIcon}>+</Text>
-                  </LinearGradient>
-                ) : (
-                  <>
-                    <Text style={[styles.icon, { color: isFocused ? Colors.primary : Colors.mute }]}>{icons[route.name]}</Text>
-                    <Text style={[styles.label, { color: isFocused ? Colors.primary : Colors.mute }]}>{String(title)}</Text>
-                  </>
-                )}
-              </Pressable>
-            );
-          })}
-        </View>
-      </BlurView>
+      {Platform.OS === 'web' ? (
+        <View style={styles.blur}>{bar}</View>
+      ) : (
+        <BlurView intensity={Platform.OS === 'ios' ? 36 : 0} tint="light" style={styles.blur}>
+          {bar}
+        </BlurView>
+      )}
     </View>
   );
 }

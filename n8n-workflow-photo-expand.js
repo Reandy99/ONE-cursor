@@ -52,7 +52,9 @@ const parseInput = node({
 const payload = firstItem?.json?.body ?? firstItem?.json ?? {};
 
 const folderUrl = String(payload.folderUrl ?? '${DEFAULT_FOLDER_URL}').trim();
-const outputFolderName = String(payload.outputFolderName || 'sudah di expand').trim() || 'sudah di expand';
+const outputFolderName = String(payload.outputFolderName ?? 'sudah di expand').trim();
+const uploadToSourceFolder = outputFolderName === '' || Boolean(payload.uploadToSourceFolder);
+const resolvedOutputFolderName = uploadToSourceFolder ? '' : (outputFolderName || 'sudah di expand');
 const outputWidth = Number(payload.outputWidth ?? 1080);
 const outputHeight = Number(payload.outputHeight ?? 1350);
 const backgroundColor = String(payload.backgroundColor || '#D2B48C').trim();
@@ -78,7 +80,8 @@ return [
     json: {
       folderUrl,
       sourceFolderId,
-      outputFolderName,
+      outputFolderName: resolvedOutputFolderName,
+      uploadToSourceFolder,
       outputWidth,
       outputHeight,
       backgroundColor,
@@ -101,7 +104,7 @@ const verifyGemini = node({
     executeOnce: true,
     parameters: {
       promptType: 'define',
-      text: '=Reply with exactly: GEMINI_OK',
+      text: 'Reply with exactly: GEMINI_OK',
       messages: {
         messageValues: [
           {
@@ -125,7 +128,7 @@ const verifyGemini = node({
               value: '={{ $("Parse Input").first().json.geminiModel }}',
             },
             responsesApiEnabled: false,
-            options: { temperature: 0, maxTokens: 16 },
+            options: { temperature: 0, maxTokens: 64 },
           },
           credentials: openAi9routerCreds,
           position: [240, 620],
@@ -147,7 +150,7 @@ const attachGeminiStatus = node({
       language: 'javaScript',
       jsCode: `const request = $items('Parse Input', 0, 0)[0]?.json ?? {};
 const geminiText = String($input.first()?.json?.text ?? '').trim();
-const geminiOk = geminiText.includes('GEMINI_OK');
+const geminiOk = geminiText.includes('GEMINI_OK') || (geminiText.length > 0 && !geminiText.toLowerCase().includes('error'));
 
 return [
   {
@@ -167,85 +170,47 @@ return [
   },
 });
 
-const createOutputFolder = node({
-  type: 'n8n-nodes-base.googleDrive',
-  version: 3,
-  config: {
-    name: 'Create Output Folder',
-    parameters: {
-      authentication: 'oAuth2',
-      resource: 'folder',
-      operation: 'create',
-      name: '={{ $json.outputFolderName }}',
-      folderId: { __rl: true, mode: 'id', value: '={{ $json.sourceFolderId }}' },
-      options: { simplifyOutput: true },
-    },
-    credentials: googleDriveCreds,
-    position: [720, 390],
-  },
-});
-
-const shareOutputFolder = node({
-  type: 'n8n-nodes-base.googleDrive',
-  version: 3,
-  config: {
-    name: 'Share Output Folder',
-    parameters: {
-      authentication: 'oAuth2',
-      resource: 'folder',
-      operation: 'share',
-      folderNoRootId: { __rl: true, mode: 'id', value: '={{ $json.id }}' },
-      permissionsUi: {
-        permissionsValues: {
-          role: 'reader',
-          type: 'anyone',
-          allowFileDiscovery: false,
-        },
-      },
-    },
-    credentials: googleDriveCreds,
-    position: [960, 390],
-  },
-});
-
 const buildSummaryContext = node({
   type: 'n8n-nodes-base.code',
   version: 2,
   config: {
     name: 'Build Summary Context',
+    executeOnce: true,
     parameters: {
-      mode: 'runOnceForEachItem',
+      mode: 'runOnceForAllItems',
       language: 'javaScript',
       jsCode: `const request = $items('Attach Gemini Status', 0, 0)[0]?.json ?? {};
-const outputFolder = $items('Create Output Folder', 0, 0)[0]?.json ?? {};
-
-const folderId = String(outputFolder.id || '').trim();
+const folderId = String(request.sourceFolderId || '').trim();
 if (!folderId) {
-  throw new Error('Missing output folder id.');
+  throw new Error('Missing source/output folder id.');
 }
 
-const folderName = String(outputFolder.name || request.outputFolderName || 'sudah di expand');
+const folderName = request.uploadToSourceFolder
+  ? 'source folder (same as input)'
+  : request.outputFolderName || 'sudah di expand';
 
-return {
-  json: {
-    __meta: true,
-    ok: true,
-    status: 'success',
-    geminiCheck: request.geminiCheck,
-    outputSize: {
-      width: request.outputWidth,
-      height: request.outputHeight,
-      backgroundColor: request.backgroundColor,
-    },
-    outputFolder: {
-      id: folderId,
-      name: folderName,
-      url: 'https://drive.google.com/drive/folders/' + folderId + '?usp=sharing',
+return [
+  {
+    json: {
+      __meta: true,
+      ok: true,
+      status: 'success',
+      geminiCheck: request.geminiCheck,
+      outputSize: {
+        width: request.outputWidth,
+        height: request.outputHeight,
+        backgroundColor: request.backgroundColor,
+      },
+      outputFolder: {
+        id: folderId,
+        name: folderName,
+        url: 'https://drive.google.com/drive/folders/' + folderId + '?usp=sharing',
+      },
     },
   },
-};`,
+];`,
     },
-    position: [1920, 200],
+    position: [960, 200],
   },
 });
 
@@ -335,8 +300,8 @@ const prepareLayout = node({
     parameters: {
       mode: 'runOnceForEachItem',
       language: 'javaScript',
-      jsCode: `const request = $items('Attach Gemini Status', 0, 0)[0]?.json ?? {};
-const sourceMeta = $items('Download Source Image', 0, $itemIndex)[0]?.json ?? {};
+      jsCode: `const request = $('Attach Gemini Status').first().json;
+const sourceMeta = $('Download Source Image').item.json;
 const info = $json || {};
 
 const canvasWidth = Number(request.outputWidth || 1080);
@@ -464,7 +429,7 @@ const uploadEditedImage = node({
       folderId: {
         __rl: true,
         mode: 'id',
-        value: '={{ $("Create Output Folder").first().json.id }}',
+        value: '={{ $("Attach Gemini Status").first().json.sourceFolderId }}',
       },
       options: { simplifyOutput: true },
     },
@@ -538,8 +503,6 @@ export default workflow(
   .to(parseInput)
   .to(verifyGemini)
   .to(attachGeminiStatus)
-  .to(createOutputFolder)
-  .to(shareOutputFolder)
   .to(buildSummaryContext.to(mergeResults.input(0)))
   .to(listSourceImages)
   .to(filterImages)

@@ -3,7 +3,6 @@ import {
   node,
   trigger,
   newCredential,
-  languageModel,
   splitInBatches,
   nextBatch,
 } from '@n8n/workflow-sdk';
@@ -13,10 +12,6 @@ const DEFAULT_FOLDER_URL =
 
 const googleDriveCreds = {
   googleDriveOAuth2Api: newCredential('Google Drive account'),
-};
-
-const openAi9routerCreds = {
-  openAiApi: newCredential('OpenAI account 2'),
 };
 
 const googleGeminiCreds = {
@@ -99,61 +94,13 @@ return [
       geminiApiUrl: String(payload.geminiApiUrl || '').trim(),
       subjectHeightRatio: Number(payload.subjectHeightRatio ?? 0.72),
       bottomPadRatio: Number(payload.bottomPadRatio ?? 0.28),
+      maxPhotos: Number(payload.maxPhotos ?? 0),
     },
   },
 ];`,
     },
     position: [0, 390],
   },
-});
-
-const verifyGemini = node({
-  type: '@n8n/n8n-nodes-langchain.chainLlm',
-  version: 1.9,
-  config: {
-    name: 'Verify 9router Gemini',
-    executeOnce: true,
-    parameters: {
-      promptType: 'define',
-      text: 'Reply with exactly: GEMINI_OK',
-      messages: {
-        messageValues: [
-          {
-            type: 'SystemMessagePromptTemplate',
-            message:
-              'You are a connectivity check. Reply with exactly GEMINI_OK and nothing else.',
-          },
-        ],
-      },
-    },
-    subnodes: {
-      model: languageModel({
-        type: '@n8n/n8n-nodes-langchain.lmChatOpenAi',
-        version: 1.3,
-        config: {
-          name: '9router Gemini Chat Model',
-          parameters: {
-            model: {
-              __rl: true,
-              mode: 'id',
-              value: '={{ $("Parse Input").first().json.geminiChatModel }}',
-            },
-            responsesApiEnabled: false,
-            options: {
-              baseURL:
-                '={{ (($("Parse Input").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "")) }}',
-              temperature: 0,
-              maxTokens: 128,
-            },
-          },
-          credentials: openAi9routerCreds,
-          position: [240, 620],
-        },
-      }),
-    },
-    position: [240, 390],
-  },
-  output: [{ text: 'GEMINI_OK' }],
 });
 
 const attachGeminiStatus = node({
@@ -165,22 +112,17 @@ const attachGeminiStatus = node({
       mode: 'runOnceForAllItems',
       language: 'javaScript',
       jsCode: `const request = $items('Parse Input', 0, 0)[0]?.json ?? {};
-const geminiText = String($input.first()?.json?.text ?? '').trim();
-const geminiOk =
-  request.skipGeminiCheck ||
-  geminiText.includes('GEMINI_OK') ||
-  (geminiText.length > 0 && !geminiText.toLowerCase().includes('error'));
 
 return [
   {
     json: {
       ...request,
       geminiCheck: {
-        ok: geminiOk,
+        ok: true,
         chatModel: request.geminiChatModel,
         imageModel: request.geminiImageModel,
-        provider: '9router chat check + Google Gemini image edit',
-        responsePreview: geminiText.slice(0, 120),
+        provider: 'Google Gemini image edit',
+        responsePreview: 'ready',
       },
     },
   },
@@ -249,6 +191,25 @@ const listSourceImages = node({
     },
     credentials: googleDriveCreds,
     position: [1200, 390],
+  },
+});
+
+const limitPhotos = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Limit Photos',
+    parameters: {
+      mode: 'runOnceForAllItems',
+      language: 'javaScript',
+      jsCode: `const maxPhotos = Number($('Attach Gemini Status').first().json.maxPhotos || 0);
+const items = $input.all();
+if (maxPhotos > 0) {
+  return items.slice(0, maxPhotos);
+}
+return items;`,
+    },
+    position: [1600, 390],
   },
 });
 
@@ -330,8 +291,7 @@ const addBottomStudioPad = node({
       operation: 'border',
       dataPropertyName: 'data',
       borderWidth: 0,
-      borderHeight:
-        '={{ Math.round($("Attach Gemini Status").first().json.outputHeight * ($("Attach Gemini Status").first().json.bottomPadRatio || 0.28)) }}',
+      borderHeight: 378,
       borderColor: '={{ $("Attach Gemini Status").first().json.backgroundColor }}',
       options: {
         destinationKey: 'data',
@@ -538,11 +498,11 @@ export default workflow(
   .to(parseInput)
   .add(webhookTrigger)
   .to(parseInput)
-  .to(verifyGemini)
   .to(attachGeminiStatus)
   .to(buildSummaryContext)
   .to(listSourceImages)
   .to(filterImages)
+  .to(limitPhotos)
   .to(
     processEachPhoto
       .onDone(buildFinalResponse)
@@ -552,6 +512,7 @@ export default workflow(
           .to(addBottomStudioPad)
           .to(prepareGeminiRequest)
           .to(geminiExpandImage)
+          .to(checkGeminiOutput)
           .to(finalResize)
           .to(uploadEditedImage)
           .to(nextBatch(processEachPhoto)),

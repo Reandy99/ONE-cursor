@@ -93,7 +93,7 @@ return [
       searchQuery,
       geminiChatModel: 'gc/gemini-3-flash-preview',
       geminiImageModel: String(
-        payload.geminiImageModel || 'models/gemini-2.5-flash-image',
+        payload.geminiImageModel || 'gc/gemini-2.5-flash-image',
       ).trim(),
       geminiApiUrl: String(payload.geminiApiUrl || '').trim(),
       subjectHeightRatio: Number(payload.subjectHeightRatio ?? 0.72),
@@ -125,7 +125,7 @@ return [
         ok: true,
         chatModel: request.geminiChatModel,
         imageModel: request.geminiImageModel,
-        provider: 'Google Gemini image edit',
+        provider: '9router OpenAI image API (OpenAI account 2)',
         responsePreview: 'ready',
       },
     },
@@ -364,18 +364,24 @@ return {
     geminiImageModel: request.geminiImageModel,
     geminiPrompt: prompt,
     geminiApiBody: {
-      contents: [
+      model: request.geminiImageModel,
+      modalities: ['image', 'text'],
+      image_config: {
+        aspect_ratio: '4:5',
+        image_size: '1K',
+      },
+      messages: [
         {
           role: 'user',
-          parts: [
-            { text: prompt },
-            { inline_data: { mime_type: mimeType, data: imageBase64 } },
+          content: [
+            { type: 'text', text: prompt },
+            {
+              type: 'image_url',
+              image_url: { url: 'data:' + mimeType + ';base64,' + imageBase64 },
+            },
           ],
         },
       ],
-      generationConfig: {
-        responseModalities: ['TEXT', 'IMAGE'],
-      },
     },
   },
   binary: $input.item.binary,
@@ -393,9 +399,9 @@ const geminiExpandImage = node({
     parameters: {
       method: 'POST',
       url:
-        '={{ "https://generativelanguage.googleapis.com/v1beta/" + ($json.geminiImageModel || "models/gemini-2.5-flash-image").replace(/^(?!models\\/)/, "models/") + ":generateContent" }}',
+        '={{ (($("Attach Gemini Status").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "")) + "/chat/completions" }}',
       authentication: 'predefinedCredentialType',
-      nodeCredentialType: 'googlePalmApi',
+      nodeCredentialType: 'openAiApi',
       sendBody: true,
       contentType: 'json',
       specifyBody: 'json',
@@ -409,15 +415,15 @@ const geminiExpandImage = node({
         },
       },
     },
-    credentials: googleGeminiCreds,
+    credentials: openAi9routerCreds,
     position: [2816, 390],
   },
   output: [
     {
-      candidates: [
+      choices: [
         {
-          content: {
-            parts: [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } }],
+          message: {
+            images: [{ image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }],
           },
         },
       ],
@@ -436,28 +442,39 @@ const parseGeminiImage = node({
       jsCode: `const response = $input.first()?.json ?? {};
 const meta = $('Prepare Gemini Request').item.json;
 
-const parts = response?.candidates?.[0]?.content?.parts || [];
-let imageBase64 = null;
-let outMime = meta.outputMimeType || 'image/png';
+const choices = response.choices || response.data?.choices || [];
+const message = choices[0]?.message || {};
+const images = message.images || message.image || [];
 
-for (const part of parts) {
-  const inline = part.inlineData || part.inline_data;
-  if (inline?.data) {
-    imageBase64 = inline.data;
-    outMime = inline.mimeType || inline.mime_type || outMime;
-    break;
+let imageUrl = null;
+if (Array.isArray(images)) {
+  for (const img of images) {
+    const url = img?.image_url?.url || img?.imageUrl?.url;
+    if (url) {
+      imageUrl = url;
+      break;
+    }
   }
 }
 
-if (!imageBase64) {
-  throw new Error(
-    'Gemini API returned no image for ' +
-      meta.sourceFileName +
-      '. Response: ' +
-      JSON.stringify(response).slice(0, 800),
-  );
+const textBlob = String(response.text || message.content || '').trim();
+if (!imageUrl && textBlob.includes('base64')) {
+  const match = textBlob.match(/data:image\\/[^;]+;base64,[A-Za-z0-9+/=]+/);
+  if (match) imageUrl = match[0];
 }
 
+if (!imageUrl) {
+  const err =
+    response.error?.message ||
+    response.message ||
+    textBlob.slice(0, 500) ||
+    JSON.stringify(response).slice(0, 800);
+  throw new Error('Gemini did not return an image for ' + meta.sourceFileName + '. Response: ' + err);
+}
+
+const dataMatch = String(imageUrl).match(/^data:([^;]+);base64,(.+)$/s);
+const outMime = dataMatch?.[1] || meta.outputMimeType || 'image/png';
+const imageBase64 = (dataMatch?.[2] || imageUrl).replace(/\\s+/g, '');
 const outBuffer = Buffer.from(imageBase64, 'base64');
 
 return {

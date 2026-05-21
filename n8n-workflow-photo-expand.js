@@ -2,6 +2,7 @@ import {
   workflow,
   node,
   trigger,
+  sticky,
   newCredential,
   splitInBatches,
   nextBatch,
@@ -586,10 +587,17 @@ return [
   },
 });
 
+const setupNote = sticky(
+  'SETUP: Open node "Gemini Expand Image" and select credential **OpenAI account 2** (9router). Optional: set maxPhotos=1 in webhook body for a quick test.',
+  [geminiExpandImage],
+  { color: 3, position: [2816, 560] },
+);
+
 export default workflow(
   'gdrive-photo-expand-center',
   'Google Drive Photo Expand + Center (Gemini AI)',
 )
+  .add(setupNote)
   .add(manualTrigger)
   .to(parseInput)
   .add(webhookTrigger)

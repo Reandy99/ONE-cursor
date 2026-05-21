@@ -88,7 +88,9 @@ return [
       backgroundColor,
       skipGeminiCheck,
       searchQuery,
-      geminiModel: 'gc/gemini-3-flash-preview',
+      geminiChatModel: 'gc/gemini-3-flash-preview',
+      geminiImageModel: String(payload.geminiImageModel || 'gc/gemini-2.5-flash-image').trim(),
+      geminiApiUrl: String(payload.geminiApiUrl || '').trim(),
     },
   },
 ];`,
@@ -121,12 +123,12 @@ const verifyGemini = node({
         type: '@n8n/n8n-nodes-langchain.lmChatOpenAi',
         version: 1.3,
         config: {
-          name: '9router Gemini Model',
+          name: '9router Gemini Chat Model',
           parameters: {
             model: {
               __rl: true,
               mode: 'id',
-              value: '={{ $("Parse Input").first().json.geminiModel }}',
+              value: '={{ $("Parse Input").first().json.geminiChatModel }}',
             },
             responsesApiEnabled: false,
             options: { temperature: 0, maxTokens: 64 },
@@ -159,7 +161,8 @@ return [
       ...request,
       geminiCheck: {
         ok: geminiOk,
-        model: request.geminiModel,
+        chatModel: request.geminiChatModel,
+        imageModel: request.geminiImageModel,
         provider: '9router via OpenAI account 2',
         responsePreview: geminiText.slice(0, 120),
       },
@@ -229,7 +232,7 @@ const listSourceImages = node({
       returnAll: true,
     },
     credentials: googleDriveCreds,
-    position: [1200, 520],
+    position: [1200, 390],
   },
 });
 
@@ -256,7 +259,7 @@ const filterImages = node({
         ],
       },
     },
-    position: [1440, 520],
+    position: [1440, 390],
   },
 });
 
@@ -276,20 +279,20 @@ const downloadSourceImage = node({
       },
     },
     credentials: googleDriveCreds,
-    position: [1680, 520],
+    position: [1920, 390],
   },
 });
 
-const resizeToFit = node({
+const resizeForGemini = node({
   type: 'n8n-nodes-base.editImage',
   version: 1,
   config: {
-    name: 'Resize To Fit',
+    name: 'Resize For Gemini',
     parameters: {
       operation: 'resize',
       dataPropertyName: 'data',
-      width: '={{ Math.round($("Attach Gemini Status").first().json.outputWidth * 0.78) }}',
-      height: '={{ Math.round($("Attach Gemini Status").first().json.outputHeight * 0.82) }}',
+      width: '={{ $("Attach Gemini Status").first().json.outputWidth }}',
+      height: '={{ $("Attach Gemini Status").first().json.outputHeight }}',
       resizeOption: 'maximumArea',
       options: {
         destinationKey: 'data',
@@ -297,48 +300,32 @@ const resizeToFit = node({
         quality: 92,
       },
     },
-    position: [1920, 520],
+    position: [2144, 390],
   },
 });
 
-const getImageInfo = node({
-  type: 'n8n-nodes-base.editImage',
-  version: 1,
-  config: {
-    name: 'Get Image Info',
-    parameters: {
-      operation: 'information',
-      dataPropertyName: 'data',
-    },
-    position: [2160, 520],
-  },
-});
-
-const prepareLayout = node({
+const prepareGeminiRequest = node({
   type: 'n8n-nodes-base.code',
   version: 2,
   config: {
-    name: 'Prepare Layout',
+    name: 'Prepare Gemini Request',
     parameters: {
       mode: 'runOnceForEachItem',
       language: 'javaScript',
       jsCode: `const request = $('Attach Gemini Status').first().json;
 const sourceMeta = $('Download Source Image').item.json;
-const info = $json || {};
+const binary = $input.item.binary?.data;
 
-const canvasWidth = Number(request.outputWidth || 1080);
-const canvasHeight = Number(request.outputHeight || 1350);
-const subjectWidth = Number(info.width || info.size?.width || 0);
-const subjectHeight = Number(info.height || info.size?.height || 0);
-
-if (!subjectWidth || !subjectHeight) {
-  throw new Error('Could not read resized image dimensions for ' + (sourceMeta.name || 'unknown file'));
+if (!binary?.data) {
+  throw new Error('Missing image binary for ' + (sourceMeta.name || 'unknown'));
 }
 
-const positionX = Math.max(0, Math.round((canvasWidth - subjectWidth) / 2));
-const positionY = Math.max(0, Math.round((canvasHeight - subjectHeight) / 2));
+const buffer = await this.helpers.getBinaryDataBuffer(0, 'data');
+const base64 = Buffer.from(buffer).toString('base64');
+const mimeType = String(binary.mimeType || 'image/jpeg');
+const dataUrl = 'data:' + mimeType + ';base64,' + base64;
 
-const sourceName = String($binary?.data?.fileName || sourceMeta.name || 'photo.jpg');
+const sourceName = String(binary.fileName || sourceMeta.name || 'photo.jpg');
 const hasExt = sourceName.includes('.');
 const base = hasExt ? sourceName.slice(0, sourceName.lastIndexOf('.')) : sourceName;
 const ext = String(hasExt ? sourceName.slice(sourceName.lastIndexOf('.') + 1) : 'jpg').toLowerCase();
@@ -346,46 +333,175 @@ let outExt = 'jpg';
 if (ext === 'png') outExt = 'png';
 else if (ext === 'webp') outExt = 'webp';
 
+const bg = request.backgroundColor || '#D2B48C';
+const prompt =
+  'Edit this portrait photo. Expand the canvas outward to a full 4:5 studio portrait. ' +
+  'Seamlessly extend the background so it naturally continues from the original frame (same lighting, same tan/beige studio tone ' +
+  bg +
+  '). Keep the person identical: same face, skin, hair, clothing. ' +
+  'If arms, hands, or elbows are cut off at the image edges, naturally complete them so they are fully visible. ' +
+  'Center the person in the frame with balanced headroom. ' +
+  'Do not change identity. Do not add text, logos, or watermarks. Photorealistic studio result.';
+
+const geminiBody = {
+  model: request.geminiImageModel,
+  modalities: ['image', 'text'],
+  image_config: {
+    aspect_ratio: '4:5',
+    image_size: '1K',
+  },
+  messages: [
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: dataUrl } },
+      ],
+    },
+  ],
+};
+
 return {
   json: {
     sourceFileId: sourceMeta.id,
     sourceFileName: sourceMeta.name,
-    canvasWidth,
-    canvasHeight,
-    backgroundColor: request.backgroundColor || '#D2B48C',
-    subjectWidth,
-    subjectHeight,
-    positionX,
-    positionY,
     outputFileName: 'edited_' + base + '.' + outExt,
     outputFormat: outExt === 'png' ? 'png' : 'jpeg',
+    outputMimeType: mimeType,
+    geminiImageModel: request.geminiImageModel,
+    geminiBody,
   },
-  binary: $input.item.binary,
 };`,
     },
-    position: [2400, 520],
+    position: [2368, 390],
   },
 });
 
-const addBackgroundBorder = node({
+const geminiExpandImage = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.4,
+  config: {
+    name: 'Gemini Expand Image',
+    parameters: {
+      method: 'POST',
+      url: '={{ ($("Attach Gemini Status").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "") + "/chat/completions" }}',
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'openAiApi',
+      sendBody: true,
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json.geminiBody) }}',
+      sendHeaders: true,
+      specifyHeaders: 'json',
+      jsonHeaders: JSON.stringify({
+        'Content-Type': 'application/json',
+      }),
+      options: {
+        timeout: 180000,
+        response: {
+          response: {
+            responseFormat: 'json',
+          },
+        },
+      },
+    },
+    credentials: openAi9routerCreds,
+    position: [2592, 390],
+  },
+});
+
+const parseGeminiImage = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Parse Gemini Image',
+    parameters: {
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const response = $input.first()?.json ?? {};
+const meta = $('Prepare Gemini Request').item.json;
+
+const choices = response.choices || response.data?.choices || [];
+const message = choices[0]?.message || {};
+const images = message.images || message.image || [];
+
+let imageUrl = null;
+if (Array.isArray(images)) {
+  for (const img of images) {
+    const url = img?.image_url?.url || img?.imageUrl?.url;
+    if (url) {
+      imageUrl = url;
+      break;
+    }
+  }
+}
+
+if (!imageUrl && typeof message.content === 'string' && message.content.includes('base64')) {
+  const match = message.content.match(/data:image\\/[^;]+;base64,[A-Za-z0-9+/=]+/);
+  if (match) imageUrl = match[0];
+}
+
+if (!imageUrl) {
+  const err = response.error?.message || response.message || JSON.stringify(response).slice(0, 500);
+  throw new Error('Gemini did not return an image for ' + meta.sourceFileName + '. Response: ' + err);
+}
+
+const dataMatch = String(imageUrl).match(/^data:([^;]+);base64,(.+)$/s);
+const imageMimeType = dataMatch?.[1] || meta.outputMimeType || 'image/png';
+const imageBase64 = (dataMatch?.[2] || imageUrl).replace(/\\s+/g, '');
+
+return {
+  json: {
+    sourceFileId: meta.sourceFileId,
+    sourceFileName: meta.sourceFileName,
+    outputFileName: meta.outputFileName,
+    outputFormat: meta.outputFormat,
+    imageMimeType,
+    imageBase64,
+    geminiImageModel: meta.geminiImageModel,
+  },
+};`,
+    },
+    position: [2816, 390],
+  },
+});
+
+const convertGeminiToFile = node({
+  type: 'n8n-nodes-base.convertToFile',
+  version: 1.1,
+  config: {
+    name: 'Convert Gemini To File',
+    parameters: {
+      operation: 'toBinary',
+      sourceProperty: 'imageBase64',
+      options: {
+        dataIsBase64: true,
+        mimeType: '={{ $json.imageMimeType }}',
+        fileName: '={{ $json.outputFileName }}',
+      },
+    },
+    position: [3040, 390],
+  },
+});
+
+const finalResize = node({
   type: 'n8n-nodes-base.editImage',
   version: 1,
   config: {
-    name: 'Add Background Border',
+    name: 'Final Resize',
     parameters: {
-      operation: 'border',
+      operation: 'resize',
       dataPropertyName: 'data',
-      borderWidth: '={{ $json.positionX }}',
-      borderHeight: '={{ $json.positionY }}',
-      borderColor: '={{ $json.backgroundColor }}',
+      width: '={{ $("Attach Gemini Status").first().json.outputWidth }}',
+      height: '={{ $("Attach Gemini Status").first().json.outputHeight }}',
+      resizeOption: 'maximumArea',
       options: {
         destinationKey: 'edited',
-        fileName: '={{ $json.outputFileName }}',
-        format: '={{ $json.outputFormat }}',
+        fileName: '={{ $("Prepare Gemini Request").item.json.outputFileName }}',
+        format: '={{ $("Prepare Gemini Request").item.json.outputFormat }}',
         quality: 92,
       },
     },
-    position: [2816, 520],
+    position: [3264, 390],
   },
 });
 
@@ -399,7 +515,7 @@ const uploadEditedImage = node({
       resource: 'file',
       operation: 'upload',
       inputDataFieldName: 'edited',
-      name: '={{ $json.outputFileName }}',
+      name: '={{ $("Prepare Gemini Request").item.json.outputFileName }}',
       folderId: {
         __rl: true,
         mode: 'id',
@@ -408,7 +524,7 @@ const uploadEditedImage = node({
       options: { simplifyOutput: true },
     },
     credentials: googleDriveCreds,
-    position: [3120, 520],
+    position: [3488, 390],
   },
 });
 
@@ -417,7 +533,7 @@ const processEachPhoto = splitInBatches({
   config: {
     name: 'Process Each Photo',
     parameters: { batchSize: 1 },
-    position: [1440, 520],
+    position: [1696, 390],
   },
 });
 
@@ -449,18 +565,18 @@ return [
       totalUploaded: uploadedFiles.length,
       uploadedFiles,
       note:
-        'Background expanded using tan border padding + centered subject. Gemini via 9router is used for connectivity check.',
+        'Generative expand via Gemini image model on 9router, then resize to target dimensions. Hands/background should continue seamlessly from the original frame.',
     },
   },
 ];`,
     },
-    position: [3600, 360],
+    position: [3712, 200],
   },
 });
 
 export default workflow(
   'gdrive-photo-expand-center',
-  'Google Drive Photo Expand + Center',
+  'Google Drive Photo Expand + Center (Gemini AI)',
 )
   .add(manualTrigger)
   .to(parseInput)
@@ -476,10 +592,12 @@ export default workflow(
       .onDone(buildFinalResponse)
       .onEachBatch(
         downloadSourceImage
-          .to(resizeToFit)
-          .to(getImageInfo)
-          .to(prepareLayout)
-          .to(addBackgroundBorder)
+          .to(resizeForGemini)
+          .to(prepareGeminiRequest)
+          .to(geminiExpandImage)
+          .to(parseGeminiImage)
+          .to(convertGeminiToFile)
+          .to(finalResize)
           .to(uploadEditedImage)
           .to(nextBatch(processEachPhoto)),
       ),

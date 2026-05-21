@@ -388,13 +388,9 @@ const geminiExpandImage = node({
       authentication: 'predefinedCredentialType',
       nodeCredentialType: 'openAiApi',
       sendBody: true,
+      contentType: 'json',
       specifyBody: 'json',
-      jsonBody: '={{ JSON.stringify($json.geminiBody) }}',
-      sendHeaders: true,
-      specifyHeaders: 'json',
-      jsonHeaders: JSON.stringify({
-        'Content-Type': 'application/json',
-      }),
+      jsonBody: '={{ $("Prepare Gemini Request").item.json.geminiBody }}',
       options: {
         timeout: 180000,
         response: {
@@ -407,6 +403,23 @@ const geminiExpandImage = node({
     credentials: openAi9routerCreds,
     position: [2592, 390],
   },
+  output: [
+    {
+      choices: [
+        {
+          message: {
+            images: [
+              {
+                image_url: {
+                  url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+                },
+              },
+            ],
+          },
+        },
+      ],
+    },
+  ],
 });
 
 const parseGeminiImage = node({

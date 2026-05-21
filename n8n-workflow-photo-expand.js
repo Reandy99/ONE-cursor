@@ -335,6 +335,9 @@ if (ext === 'png') outExt = 'png';
 else if (ext === 'webp') outExt = 'webp';
 
 const bg = request.backgroundColor || '#D2B48C';
+const buffer = await this.helpers.getBinaryDataBuffer(0, 'data');
+const imageBase64 = Buffer.from(buffer).toString('base64');
+
 const padPx = Math.round(
   (request.outputHeight || 1350) * (request.bottomPadRatio || 0.28),
 );
@@ -360,6 +363,20 @@ return {
     outputMimeType: mimeType,
     geminiImageModel: request.geminiImageModel,
     geminiPrompt: prompt,
+    geminiApiBody: {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: mimeType, data: imageBase64 } },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseModalities: ['TEXT', 'IMAGE'],
+      },
+    },
   },
   binary: $input.item.binary,
 };`,
@@ -369,62 +386,60 @@ return {
 });
 
 const geminiExpandImage = node({
-  type: 'n8n-nodes-base.code',
-  version: 2,
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.4,
   config: {
     name: 'Gemini Expand Image',
-    credentials: googleGeminiCreds,
     parameters: {
-      mode: 'runOnceForEachItem',
-      language: 'javaScript',
-      jsCode: `const creds = await this.helpers.getCredentials('googlePalmApi');
-const apiKey = creds.apiKey || creds.key || creds.token;
-if (!apiKey) {
-  throw new Error('Google Gemini API key missing on this node (googlePalmApi credential).');
-}
-
-const meta = $json;
-const modelRaw = String(meta.geminiImageModel || 'models/gemini-2.5-flash-image').trim();
-const modelPath = modelRaw.startsWith('models/') ? modelRaw : 'models/' + modelRaw;
-
-const buffer = await this.helpers.getBinaryDataBuffer(0, 'data');
-const base64 = Buffer.from(buffer).toString('base64');
-const mimeType = String($input.item.binary?.data?.mimeType || 'image/jpeg');
-
-const body = {
-  contents: [
+      method: 'POST',
+      url:
+        '={{ "https://generativelanguage.googleapis.com/v1beta/" + ($json.geminiImageModel || "models/gemini-2.5-flash-image").replace(/^(?!models\\/)/, "models/") + ":generateContent" }}',
+      authentication: 'predefinedCredentialType',
+      nodeCredentialType: 'googlePalmApi',
+      sendBody: true,
+      contentType: 'json',
+      specifyBody: 'json',
+      jsonBody: '={{ JSON.stringify($json.geminiApiBody) }}',
+      options: {
+        timeout: 180000,
+        response: {
+          response: {
+            responseFormat: 'json',
+          },
+        },
+      },
+    },
+    credentials: googleGeminiCreds,
+    position: [2816, 390],
+  },
+  output: [
     {
-      role: 'user',
-      parts: [
-        { text: meta.geminiPrompt },
-        { inline_data: { mime_type: mimeType, data: base64 } },
+      candidates: [
+        {
+          content: {
+            parts: [{ inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } }],
+          },
+        },
       ],
     },
   ],
-  generationConfig: {
-    responseModalities: ['TEXT', 'IMAGE'],
-  },
-};
+});
 
-let response;
-try {
-  response = await this.helpers.httpRequest({
-    method: 'POST',
-    url: 'https://generativelanguage.googleapis.com/v1beta/' + modelPath + ':generateContent',
-    qs: { key: apiKey },
-    body,
-    json: true,
-    timeout: 180000,
-  });
-} catch (err) {
-  const status = err?.response?.statusCode || err?.statusCode;
-  const detail = err?.response?.body || err?.message || String(err);
-  throw new Error('Gemini API HTTP ' + (status || '') + ': ' + JSON.stringify(detail).slice(0, 800));
-}
+const parseGeminiImage = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Parse Gemini Image',
+    parameters: {
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const response = $input.first()?.json ?? {};
+const meta = $('Prepare Gemini Request').item.json;
 
 const parts = response?.candidates?.[0]?.content?.parts || [];
 let imageBase64 = null;
-let outMime = 'image/png';
+let outMime = meta.outputMimeType || 'image/png';
+
 for (const part of parts) {
   const inline = part.inlineData || part.inline_data;
   if (inline?.data) {
@@ -444,7 +459,6 @@ if (!imageBase64) {
 }
 
 const outBuffer = Buffer.from(imageBase64, 'base64');
-const fileName = meta.outputFileName || 'edited.jpg';
 
 return {
   json: {
@@ -452,11 +466,15 @@ return {
     imageMimeType: outMime,
   },
   binary: {
-    data: await this.helpers.prepareBinaryData(outBuffer, fileName, outMime),
+    data: await this.helpers.prepareBinaryData(
+      outBuffer,
+      meta.outputFileName || 'edited.jpg',
+      outMime,
+    ),
   },
 };`,
     },
-    position: [2816, 390],
+    position: [3040, 390],
   },
 });
 
@@ -573,6 +591,7 @@ export default workflow(
           .to(addBottomStudioPad)
           .to(prepareGeminiRequest)
           .to(geminiExpandImage)
+          .to(parseGeminiImage)
           .to(finalResize)
           .to(uploadEditedImage)
           .to(nextBatch(processEachPhoto)),

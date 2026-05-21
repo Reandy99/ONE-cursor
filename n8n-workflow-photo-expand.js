@@ -97,6 +97,8 @@ return [
         payload.geminiImageModel || 'models/gemini-2.5-flash-image',
       ).trim(),
       geminiApiUrl: String(payload.geminiApiUrl || '').trim(),
+      subjectHeightRatio: Number(payload.subjectHeightRatio ?? 0.72),
+      bottomPadRatio: Number(payload.bottomPadRatio ?? 0.28),
     },
   },
 ];`,
@@ -294,25 +296,88 @@ const downloadSourceImage = node({
   },
 });
 
-const resizeForGemini = node({
-  type: 'n8n-nodes-base.editImage',
-  version: 1,
+const padCanvasForOutpaint = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
   config: {
-    name: 'Resize For Gemini',
+    name: 'Pad Canvas For Outpaint',
     parameters: {
-      operation: 'resize',
-      dataPropertyName: 'data',
-      width: '={{ $("Attach Gemini Status").first().json.outputWidth }}',
-      height: '={{ $("Attach Gemini Status").first().json.outputHeight }}',
-      resizeOption: 'maximumArea',
-      options: {
-        destinationKey: 'data',
-        fileName: '={{ $binary.data.fileName }}',
-        quality: 92,
-      },
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const sharp = require('sharp');
+const request = $('Attach Gemini Status').first().json;
+const sourceMeta = $('Download Source Image').item.json;
+const binary = $input.item.binary?.data;
+
+if (!binary?.data) {
+  throw new Error('Missing image binary for ' + (sourceMeta.name || 'unknown'));
+}
+
+const outW = Number(request.outputWidth || 1080);
+const outH = Number(request.outputHeight || 1350);
+const subjectHeightRatio = Number(request.subjectHeightRatio ?? 0.72);
+const bottomPadRatio = Number(request.bottomPadRatio ?? 0.28);
+
+const bgHex = String(request.backgroundColor || '#D2B48C').replace('#', '');
+const bg = {
+  r: parseInt(bgHex.slice(0, 2), 16) || 210,
+  g: parseInt(bgHex.slice(2, 4), 16) || 180,
+  b: parseInt(bgHex.slice(4, 6), 16) || 140,
+};
+
+const buffer = await this.helpers.getBinaryDataBuffer(0, 'data');
+const meta = await sharp(buffer).metadata();
+
+const maxSubjectH = Math.round(outH * subjectHeightRatio);
+const scale = Math.min(outW / meta.width, maxSubjectH / meta.height);
+const fitW = Math.max(1, Math.round(meta.width * scale));
+const fitH = Math.max(1, Math.round(meta.height * scale));
+
+const subjectTop = Math.round(outH * 0.05);
+const subjectLeft = Math.round((outW - fitW) / 2);
+const subjectBottom = subjectTop + fitH;
+const bottomPadPx = outH - subjectBottom;
+
+const resized = await sharp(buffer).resize(fitW, fitH, { fit: 'inside' }).toBuffer();
+
+const canvas = await sharp({
+  create: {
+    width: outW,
+    height: outH,
+    channels: 3,
+    background: bg,
+  },
+})
+  .composite([{ input: resized, top: subjectTop, left: subjectLeft }])
+  .jpeg({ quality: 92 })
+  .toBuffer();
+
+const fileName = String(binary.fileName || sourceMeta.name || 'padded.jpg');
+
+return {
+  json: {
+    canvasWidth: outW,
+    canvasHeight: outH,
+    subjectBottom,
+    bottomPadPx,
+    subjectHeightRatio,
+    bottomPadRatio,
+  },
+  binary: {
+    data: await this.helpers.prepareBinaryData(canvas, fileName, 'image/jpeg'),
+  },
+};`,
     },
     position: [2144, 390],
   },
+  output: [
+    {
+      canvasWidth: 1080,
+      canvasHeight: 1350,
+      subjectBottom: 980,
+      bottomPadPx: 370,
+    },
+  ],
 });
 
 const prepareGeminiRequest = node({
@@ -342,14 +407,19 @@ if (ext === 'png') outExt = 'png';
 else if (ext === 'webp') outExt = 'webp';
 
 const bg = request.backgroundColor || '#D2B48C';
+const pad = $('Pad Canvas For Outpaint').item.json;
 const prompt =
-  'Edit this portrait photo. Expand the canvas outward to a full 4:5 studio portrait. ' +
-  'Seamlessly extend the background so it naturally continues from the original frame (same lighting, same tan/beige studio tone ' +
+  'OUTPAINT / INPAINT TASK on a 4:5 studio portrait canvas. ' +
+  'The tan/beige studio background below the subject (' +
   bg +
-  '). Keep the person identical: same face, skin, hair, clothing. ' +
-  'If arms, hands, or elbows are cut off at the image edges, naturally complete them so they are fully visible. ' +
-  'Center the person in the frame with balanced headroom. ' +
-  'Do not change identity. Do not add text, logos, or watermarks. Photorealistic studio result.';
+  ', about ' +
+  (pad.bottomPadPx || 300) +
+  'px) is EMPTY padding — you must GENERATE the missing body there. ' +
+  'The subject arms currently end abruptly at the waist/crop line with NO hands visible. ' +
+  'MANDATORY: paint continuous forearms from the blazer sleeves and BOTH HANDS fully visible (natural relaxed pose at sides, fingers clear). ' +
+  'Do NOT stop arms at the old crop edge. Match exact suit, shirt, tie, skin tone, lighting, and studio background. ' +
+  'Keep face, hair, and identity unchanged. Center subject with balanced headroom. ' +
+  'Photorealistic, no text, logos, or watermarks.';
 
 return {
   json: {
@@ -485,7 +555,7 @@ return [
       totalUploaded: uploadedFiles.length,
       uploadedFiles,
       note:
-        'Generative expand via Google Gemini image edit (models/gemini-2.5-flash-image), then resize to target dimensions.',
+        'Outpaint via padded 4:5 canvas + Gemini image edit; forearms and hands generated in bottom pad area.',
     },
   },
 ];`,
@@ -512,7 +582,7 @@ export default workflow(
       .onDone(buildFinalResponse)
       .onEachBatch(
         downloadSourceImage
-          .to(resizeForGemini)
+          .to(padCanvasForOutpaint)
           .to(prepareGeminiRequest)
           .to(geminiExpandImage)
           .to(finalResize)

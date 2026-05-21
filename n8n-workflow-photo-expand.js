@@ -89,7 +89,9 @@ return [
       skipGeminiCheck,
       searchQuery,
       geminiChatModel: 'gc/gemini-3-flash-preview',
-      geminiImageModel: String(payload.geminiImageModel || 'gc/gemini-2.5-flash-image').trim(),
+      geminiImageModel: String(
+        payload.geminiImageModel || 'gc/gemini-2.5-flash-image',
+      ).trim(),
       geminiApiUrl: String(payload.geminiApiUrl || '').trim(),
     },
   },
@@ -131,7 +133,12 @@ const verifyGemini = node({
               value: '={{ $("Parse Input").first().json.geminiChatModel }}',
             },
             responsesApiEnabled: false,
-            options: { temperature: 0, maxTokens: 64 },
+            options: {
+              baseURL:
+                '={{ (($("Parse Input").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "")) }}',
+              temperature: 0,
+              maxTokens: 64,
+            },
           },
           credentials: openAi9routerCreds,
           position: [240, 620],
@@ -369,8 +376,10 @@ return {
     outputFormat: outExt === 'png' ? 'png' : 'jpeg',
     outputMimeType: mimeType,
     geminiImageModel: request.geminiImageModel,
+    geminiPrompt: prompt,
     geminiBody,
   },
+  binary: $input.item.binary,
 };`,
     },
     position: [2368, 390],
@@ -378,46 +387,56 @@ return {
 });
 
 const geminiExpandImage = node({
-  type: 'n8n-nodes-base.httpRequest',
-  version: 4.4,
+  type: '@n8n/n8n-nodes-langchain.chainLlm',
+  version: 1.9,
   config: {
     name: 'Gemini Expand Image',
     parameters: {
-      method: 'POST',
-      url: '={{ ($("Attach Gemini Status").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "") + "/chat/completions" }}',
-      authentication: 'predefinedCredentialType',
-      nodeCredentialType: 'openAiApi',
-      sendBody: true,
-      contentType: 'json',
-      specifyBody: 'json',
-      jsonBody: '={{ $("Prepare Gemini Request").item.json.geminiBody }}',
-      options: {
-        timeout: 180000,
-        response: {
-          response: {
-            responseFormat: 'json',
+      promptType: 'define',
+      text: '={{ $json.geminiPrompt }}',
+      messages: {
+        messageValues: [
+          {
+            type: 'HumanMessagePromptTemplate',
+            messageType: 'imageBinary',
+            binaryImageDataKey: 'data',
+            imageDetail: 'high',
           },
-        },
+        ],
       },
+      batching: { batchSize: 1, delayBetweenBatches: 0 },
     },
-    credentials: openAi9routerCreds,
+    subnodes: {
+      model: languageModel({
+        type: '@n8n/n8n-nodes-langchain.lmChatOpenAi',
+        version: 1.3,
+        config: {
+          name: '9router Gemini Image Model',
+          parameters: {
+            model: {
+              __rl: true,
+              mode: 'id',
+              value: '={{ $json.geminiImageModel }}',
+            },
+            responsesApiEnabled: false,
+            options: {
+              baseURL:
+                '={{ (($("Attach Gemini Status").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "")) }}',
+              temperature: 0.2,
+              maxTokens: 8192,
+              timeout: 180000,
+            },
+          },
+          credentials: openAi9routerCreds,
+          position: [2592, 620],
+        },
+      }),
+    },
     position: [2592, 390],
   },
   output: [
     {
-      choices: [
-        {
-          message: {
-            images: [
-              {
-                image_url: {
-                  url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-                },
-              },
-            ],
-          },
-        },
-      ],
+      text: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
     },
   ],
 });
@@ -448,13 +467,23 @@ if (Array.isArray(images)) {
   }
 }
 
+const textBlob = String(response.text || message.content || '').trim();
+if (!imageUrl && textBlob.includes('base64')) {
+  const match = textBlob.match(/data:image\\/[^;]+;base64,[A-Za-z0-9+/=]+/);
+  if (match) imageUrl = match[0];
+}
+
 if (!imageUrl && typeof message.content === 'string' && message.content.includes('base64')) {
   const match = message.content.match(/data:image\\/[^;]+;base64,[A-Za-z0-9+/=]+/);
   if (match) imageUrl = match[0];
 }
 
 if (!imageUrl) {
-  const err = response.error?.message || response.message || JSON.stringify(response).slice(0, 500);
+  const err =
+    response.error?.message ||
+    response.message ||
+    textBlob.slice(0, 500) ||
+    JSON.stringify(response).slice(0, 500);
   throw new Error('Gemini did not return an image for ' + meta.sourceFileName + '. Response: ' + err);
 }
 

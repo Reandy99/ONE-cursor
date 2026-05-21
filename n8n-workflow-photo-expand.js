@@ -63,7 +63,7 @@ const resolvedOutputFolderName = uploadToSourceFolder ? '' : (outputFolderName |
 const outputWidth = Number(payload.outputWidth ?? 1080);
 const outputHeight = Number(payload.outputHeight ?? 1350);
 const backgroundColor = String(payload.backgroundColor || '#D2B48C').trim();
-const skipGeminiCheck = Boolean(payload.skipGeminiCheck);
+const skipGeminiCheck = payload.skipGeminiCheck !== false;
 
 const folderPathMatch = folderUrl.match(/\\/folders\\/([a-zA-Z0-9_-]+)/);
 const folderQueryMatch = folderUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
@@ -143,7 +143,7 @@ const verifyGemini = node({
               baseURL:
                 '={{ (($("Parse Input").first().json.geminiApiUrl || "http://43.156.181.204:20128/v1").replace(/\\/$/, "")) }}',
               temperature: 0,
-              maxTokens: 64,
+              maxTokens: 128,
             },
           },
           credentials: openAi9routerCreds,
@@ -166,7 +166,10 @@ const attachGeminiStatus = node({
       language: 'javaScript',
       jsCode: `const request = $items('Parse Input', 0, 0)[0]?.json ?? {};
 const geminiText = String($input.first()?.json?.text ?? '').trim();
-const geminiOk = geminiText.includes('GEMINI_OK') || (geminiText.length > 0 && !geminiText.toLowerCase().includes('error'));
+const geminiOk =
+  request.skipGeminiCheck ||
+  geminiText.includes('GEMINI_OK') ||
+  (geminiText.length > 0 && !geminiText.toLowerCase().includes('error'));
 
 return [
   {
@@ -296,88 +299,49 @@ const downloadSourceImage = node({
   },
 });
 
-const padCanvasForOutpaint = node({
-  type: 'n8n-nodes-base.code',
-  version: 2,
+const scaleDownForApi = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
   config: {
-    name: 'Pad Canvas For Outpaint',
+    name: 'Scale Down For API',
     parameters: {
-      mode: 'runOnceForEachItem',
-      language: 'javaScript',
-      jsCode: `const sharp = require('sharp');
-const request = $('Attach Gemini Status').first().json;
-const sourceMeta = $('Download Source Image').item.json;
-const binary = $input.item.binary?.data;
-
-if (!binary?.data) {
-  throw new Error('Missing image binary for ' + (sourceMeta.name || 'unknown'));
-}
-
-const outW = Number(request.outputWidth || 1080);
-const outH = Number(request.outputHeight || 1350);
-const subjectHeightRatio = Number(request.subjectHeightRatio ?? 0.72);
-const bottomPadRatio = Number(request.bottomPadRatio ?? 0.28);
-
-const bgHex = String(request.backgroundColor || '#D2B48C').replace('#', '');
-const bg = {
-  r: parseInt(bgHex.slice(0, 2), 16) || 210,
-  g: parseInt(bgHex.slice(2, 4), 16) || 180,
-  b: parseInt(bgHex.slice(4, 6), 16) || 140,
-};
-
-const buffer = await this.helpers.getBinaryDataBuffer(0, 'data');
-const meta = await sharp(buffer).metadata();
-
-const maxSubjectH = Math.round(outH * subjectHeightRatio);
-const scale = Math.min(outW / meta.width, maxSubjectH / meta.height);
-const fitW = Math.max(1, Math.round(meta.width * scale));
-const fitH = Math.max(1, Math.round(meta.height * scale));
-
-const subjectTop = Math.round(outH * 0.05);
-const subjectLeft = Math.round((outW - fitW) / 2);
-const subjectBottom = subjectTop + fitH;
-const bottomPadPx = outH - subjectBottom;
-
-const resized = await sharp(buffer).resize(fitW, fitH, { fit: 'inside' }).toBuffer();
-
-const canvas = await sharp({
-  create: {
-    width: outW,
-    height: outH,
-    channels: 3,
-    background: bg,
-  },
-})
-  .composite([{ input: resized, top: subjectTop, left: subjectLeft }])
-  .jpeg({ quality: 92 })
-  .toBuffer();
-
-const fileName = String(binary.fileName || sourceMeta.name || 'padded.jpg');
-
-return {
-  json: {
-    canvasWidth: outW,
-    canvasHeight: outH,
-    subjectBottom,
-    bottomPadPx,
-    subjectHeightRatio,
-    bottomPadRatio,
-  },
-  binary: {
-    data: await this.helpers.prepareBinaryData(canvas, fileName, 'image/jpeg'),
-  },
-};`,
+      operation: 'resize',
+      dataPropertyName: 'data',
+      width: '={{ $("Attach Gemini Status").first().json.outputWidth }}',
+      height:
+        '={{ Math.round($("Attach Gemini Status").first().json.outputHeight * ($("Attach Gemini Status").first().json.subjectHeightRatio || 0.72)) }}',
+      resizeOption: 'maximumArea',
+      options: {
+        destinationKey: 'data',
+        fileName: '={{ $binary.data.fileName }}',
+        quality: 85,
+      },
     },
     position: [2144, 390],
   },
-  output: [
-    {
-      canvasWidth: 1080,
-      canvasHeight: 1350,
-      subjectBottom: 980,
-      bottomPadPx: 370,
+});
+
+const addBottomStudioPad = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
+  config: {
+    name: 'Add Bottom Studio Pad',
+    parameters: {
+      operation: 'border',
+      dataPropertyName: 'data',
+      borderWidth: 0,
+      borderHeight:
+        '={{ Math.round($("Attach Gemini Status").first().json.outputHeight * ($("Attach Gemini Status").first().json.bottomPadRatio || 0.28)) }}',
+      borderColor: '={{ $("Attach Gemini Status").first().json.backgroundColor }}',
+      options: {
+        destinationKey: 'data',
+        fileName: '={{ $binary.data.fileName }}',
+        format: 'jpeg',
+        quality: 92,
+      },
     },
-  ],
+    position: [2368, 390],
+  },
 });
 
 const prepareGeminiRequest = node({
@@ -407,14 +371,16 @@ if (ext === 'png') outExt = 'png';
 else if (ext === 'webp') outExt = 'webp';
 
 const bg = request.backgroundColor || '#D2B48C';
-const pad = $('Pad Canvas For Outpaint').item.json;
+const padPx = Math.round(
+  (request.outputHeight || 1350) * (request.bottomPadRatio || 0.28),
+);
 const prompt =
-  'OUTPAINT / INPAINT TASK on a 4:5 studio portrait canvas. ' +
-  'The tan/beige studio background below the subject (' +
+  'OUTPAINT / INPAINT TASK on a studio portrait. ' +
+  'The tan/beige studio strip below the subject (' +
   bg +
   ', about ' +
-  (pad.bottomPadPx || 300) +
-  'px) is EMPTY padding — you must GENERATE the missing body there. ' +
+  padPx +
+  'px added at the bottom) is EMPTY padding — you must GENERATE the missing body there. ' +
   'The subject arms currently end abruptly at the waist/crop line with NO hands visible. ' +
   'MANDATORY: paint continuous forearms from the blazer sleeves and BOTH HANDS fully visible (natural relaxed pose at sides, fingers clear). ' +
   'Do NOT stop arms at the old crop edge. Match exact suit, shirt, tie, skin tone, lighting, and studio background. ' +
@@ -582,7 +548,8 @@ export default workflow(
       .onDone(buildFinalResponse)
       .onEachBatch(
         downloadSourceImage
-          .to(padCanvasForOutpaint)
+          .to(scaleDownForApi)
+          .to(addBottomStudioPad)
           .to(prepareGeminiRequest)
           .to(geminiExpandImage)
           .to(finalResize)

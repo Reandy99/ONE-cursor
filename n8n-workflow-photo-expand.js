@@ -18,6 +18,10 @@ const googleGeminiCreds = {
   googlePalmApi: newCredential('Google Gemini(PaLM) Api account'),
 };
 
+const openAi9routerCreds = {
+  openAiApi: newCredential('OpenAI account 2'),
+};
+
 const manualTrigger = trigger({
   type: 'n8n-nodes-base.manualTrigger',
   version: 1,
@@ -365,38 +369,95 @@ return {
 });
 
 const geminiExpandImage = node({
-  type: '@n8n/n8n-nodes-langchain.googleGemini',
-  version: 1.2,
+  type: 'n8n-nodes-base.code',
+  version: 2,
   config: {
     name: 'Gemini Expand Image',
-    parameters: {
-      resource: 'image',
-      operation: 'edit',
-      modelId: {
-        __rl: true,
-        mode: 'id',
-        value: '={{ $json.geminiImageModel }}',
-      },
-      prompt: '={{ $json.geminiPrompt }}',
-      images: {
-        values: [{ binaryPropertyName: 'data' }],
-      },
-      options: {
-        binaryPropertyOutput: 'data',
-      },
-    },
     credentials: googleGeminiCreds,
-    position: [2592, 390],
-  },
-  output: [
+    parameters: {
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const creds = await this.getCredentials('googlePalmApi');
+const apiKey = creds.apiKey || creds.key || creds.token;
+if (!apiKey) {
+  throw new Error('Google Gemini API key missing. Connect Google Gemini(PaLM) Api credential on this node.');
+}
+
+const meta = $json;
+const modelRaw = String(meta.geminiImageModel || 'models/gemini-2.5-flash-image').trim();
+const modelPath = modelRaw.startsWith('models/') ? modelRaw : 'models/' + modelRaw;
+
+const buffer = await this.helpers.getBinaryDataBuffer(0, 'data');
+const base64 = Buffer.from(buffer).toString('base64');
+const mimeType = String($input.item.binary?.data?.mimeType || 'image/jpeg');
+
+const body = {
+  contents: [
     {
-      sourceFileId: 'abc123',
-      sourceFileName: 'photo.jpg',
-      outputFileName: 'edited_photo.jpg',
-      outputFormat: 'jpeg',
-      geminiImageModel: 'models/gemini-2.5-flash-image',
+      role: 'user',
+      parts: [
+        { text: meta.geminiPrompt },
+        { inline_data: { mime_type: mimeType, data: base64 } },
+      ],
     },
   ],
+  generationConfig: {
+    responseModalities: ['TEXT', 'IMAGE'],
+  },
+};
+
+let response;
+try {
+  response = await this.helpers.httpRequest({
+    method: 'POST',
+    url: 'https://generativelanguage.googleapis.com/v1beta/' + modelPath + ':generateContent',
+    qs: { key: apiKey },
+    body,
+    json: true,
+    timeout: 180000,
+  });
+} catch (err) {
+  const status = err?.response?.statusCode || err?.statusCode;
+  const detail = err?.response?.body || err?.message || String(err);
+  throw new Error('Gemini API HTTP ' + (status || '') + ': ' + JSON.stringify(detail).slice(0, 800));
+}
+
+const parts = response?.candidates?.[0]?.content?.parts || [];
+let imageBase64 = null;
+let outMime = 'image/png';
+for (const part of parts) {
+  const inline = part.inlineData || part.inline_data;
+  if (inline?.data) {
+    imageBase64 = inline.data;
+    outMime = inline.mimeType || inline.mime_type || outMime;
+    break;
+  }
+}
+
+if (!imageBase64) {
+  throw new Error(
+    'Gemini API returned no image for ' +
+      meta.sourceFileName +
+      '. Response: ' +
+      JSON.stringify(response).slice(0, 800),
+  );
+}
+
+const outBuffer = Buffer.from(imageBase64, 'base64');
+const fileName = meta.outputFileName || 'edited.jpg';
+
+return {
+  json: {
+    ...meta,
+    imageMimeType: outMime,
+  },
+  binary: {
+    data: await this.helpers.prepareBinaryData(outBuffer, fileName, outMime),
+  },
+};`,
+    },
+    position: [2816, 390],
+  },
 });
 
 const finalResize = node({
@@ -512,7 +573,6 @@ export default workflow(
           .to(addBottomStudioPad)
           .to(prepareGeminiRequest)
           .to(geminiExpandImage)
-          .to(checkGeminiOutput)
           .to(finalResize)
           .to(uploadEditedImage)
           .to(nextBatch(processEachPhoto)),

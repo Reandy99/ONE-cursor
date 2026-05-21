@@ -1,0 +1,14 @@
+---
+description: Aktifkan agent expert builder n8n — workflow baru, edit, debug, publish. User awam cukup jelaskan goal; jangan minta node/JSON.
+globs:
+alwaysApply: false
+---
+
+# n8n Workflow Builder
+
+When the user works on **n8n workflows** (create, fix, automate, integrasi, webhook, schedule, execution error):
+
+1. **Read and follow** `.cursor/skills/n8n-workflow-builder/SKILL.md` immediately — treat it as mandatory.
+2. Use the **n8n MCP server** for all builds (SDK → validate → create/update → test).
+3. Speak to the user in **plain language** (Bahasa Indonesia if they do). Summarize flows without node jargon.
+4. **Never** ask the user for node type names, JSON, or expression syntax unless they request technical detail.

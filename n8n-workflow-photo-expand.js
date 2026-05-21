@@ -346,7 +346,6 @@ let outExt = 'jpg';
 if (ext === 'png') outExt = 'png';
 else if (ext === 'webp') outExt = 'webp';
 
-const item = $input.item;
 return {
   json: {
     sourceFileId: sourceMeta.id,
@@ -361,76 +360,24 @@ return {
     outputFileName: 'edited_' + base + '.' + outExt,
     outputFormat: outExt === 'png' ? 'png' : 'jpeg',
   },
-  binary: $('Resize To Fit').item.binary,
+  binary: $input.item.binary,
 };`,
     },
     position: [2400, 520],
   },
 });
 
-const createBackgroundCanvas = node({
+const addBackgroundBorder = node({
   type: 'n8n-nodes-base.editImage',
   version: 1,
   config: {
-    name: 'Create Background Canvas',
+    name: 'Add Background Border',
     parameters: {
-      operation: 'create',
-      backgroundColor: '={{ $json.backgroundColor }}',
-      width: '={{ $json.canvasWidth }}',
-      height: '={{ $json.canvasHeight }}',
-      options: {
-        destinationKey: 'canvas',
-        fileName: '={{ $json.outputFileName }}',
-        format: '={{ $json.outputFormat }}',
-        quality: 92,
-      },
-    },
-    position: [2640, 520],
-  },
-});
-
-const restorePhotoBinary = node({
-  type: 'n8n-nodes-base.code',
-  version: 2,
-  config: {
-    name: 'Restore Photo Binary',
-    parameters: {
-      mode: 'runOnceForEachItem',
-      language: 'javaScript',
-      jsCode: `const layoutBinary = $('Prepare Layout').item.binary;
-const canvasBinary = $input.item.binary?.canvas;
-
-if (!layoutBinary?.data) {
-  throw new Error('Missing resized photo binary before composite.');
-}
-if (!canvasBinary) {
-  throw new Error('Missing canvas binary before composite.');
-}
-
-return {
-  json: $input.item.json,
-  binary: {
-    canvas: canvasBinary,
-    data: layoutBinary.data,
-  },
-};`,
-    },
-    position: [2920, 520],
-  },
-});
-
-const compositeCentered = node({
-  type: 'n8n-nodes-base.editImage',
-  version: 1,
-  config: {
-    name: 'Composite Centered',
-    parameters: {
-      operation: 'composite',
-      dataPropertyName: 'canvas',
-      dataPropertyNameComposite: 'data',
-      positionX: '={{ $json.positionX }}',
-      positionY: '={{ $json.positionY }}',
-      operator: 'Over',
+      operation: 'border',
+      dataPropertyName: 'data',
+      borderWidth: '={{ $json.positionX }}',
+      borderHeight: '={{ $json.positionY }}',
+      borderColor: '={{ $json.backgroundColor }}',
       options: {
         destinationKey: 'edited',
         fileName: '={{ $json.outputFileName }}',
@@ -438,7 +385,7 @@ const compositeCentered = node({
         quality: 92,
       },
     },
-    position: [2880, 520],
+    position: [2816, 520],
   },
 });
 
@@ -502,7 +449,7 @@ return [
       totalUploaded: uploadedFiles.length,
       uploadedFiles,
       note:
-        'Background expanded using canvas fill + centered composite. Gemini via 9router is used for connectivity check; swap in image-edit model when available.',
+        'Background expanded using tan border padding + centered subject. Gemini via 9router is used for connectivity check.',
     },
   },
 ];`,
@@ -532,9 +479,7 @@ export default workflow(
           .to(resizeToFit)
           .to(getImageInfo)
           .to(prepareLayout)
-          .to(createBackgroundCanvas)
-          .to(restorePhotoBinary)
-          .to(compositeCentered)
+          .to(addBackgroundBorder)
           .to(uploadEditedImage)
           .to(nextBatch(processEachPhoto)),
       ),

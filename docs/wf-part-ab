@@ -1,0 +1,160 @@
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Define Folders',
+    position: [224, 0],
+    parameters: {
+      mode: 'runOnceForAllItems',
+      jsCode: `return [
+  { json: { folderId: '1jvnMm0mVdtR7ztqVebhxCv1qDVKPQhjr', folderLabel: '12A' } },
+  { json: { folderId: '1E9vkIIFS6k4GlIKyMh1oqB9lKPw2OqzN', folderLabel: '12B' } },
+  { json: { folderId: '1CG57mnpapPzfPvp488N0FACZ4kBu7vAy', folderLabel: '12C' } },
+  { json: { folderId: '1qOQa4RdJW8aDEwpSMZntx6iEwLtMRJ7I', folderLabel: '12D' } }
+];`,
+    },
+  },
+  output: [
+    { folderId: '1jvnMm0mVdtR7ztqVebhxCv1qDVKPQhjr', folderLabel: '12A' },
+    { folderId: '1E9vkIIFS6k4GlIKyMh1oqB9lKPw2OqzN', folderLabel: '12B' },
+  ],
+});
+
+const fetchFolderHtml = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.4,
+  config: {
+    name: 'Fetch Folder HTML',
+    position: [448, 0],
+    parameters: {
+      method: 'GET',
+      url: '={{ "https://drive.google.com/drive/folders/" + $json.folderId }}',
+      options: {
+        response: {
+          response: {
+            responseFormat: 'text',
+          },
+        },
+      },
+    },
+  },
+  output: [{ data: '<html>...</html>' }],
+});
+
+const extractImages = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Extract Images',
+    position: [672, 0],
+    parameters: {
+      mode: 'runOnceForAllItems',
+      jsCode: `const out = [];
+const items = $input.all();
+const folderItems = $items("Define Folders");
+
+for (let i = 0; i < items.length; i++) {
+  const html = items[i].json.data;
+  const folderLabel = folderItems[i].json.folderLabel;
+  const regex = /data-id=\\"([^\\"]+)\\"[^>]*data-tooltip=\\"([^\\"]+\\.(?:jpg|jpeg|png|webp)) Image\\"/gi;
+  const seen = new Set();
+  let m;
+  while ((m = regex.exec(html)) !== null) {
+    const fileId = m[1];
+    const name = m[2];
+    if (seen.has(fileId)) continue;
+    seen.add(fileId);
+    out.push({ json: { fileId, name, folderLabel } });
+  }
+}
+return out;`,
+    },
+  },
+  output: [{ fileId: 'abc', name: 'photo.jpg', folderLabel: '12A' }],
+});
+
+const downloadImage = node({
+  type: 'n8n-nodes-base.httpRequest',
+  version: 4.4,
+  config: {
+    name: 'Download Image',
+    position: [896, 0],
+    parameters: {
+      method: 'GET',
+      url: '={{ "https://drive.google.com/uc?export=download&id=" + $json.fileId }}',
+      options: {
+        response: {
+          response: {
+            responseFormat: 'file',
+            outputPropertyName: 'data',
+          },
+        },
+      },
+    },
+  },
+  output: [{ fileId: 'abc', name: 'photo.jpg', folderLabel: '12A' }],
+});
+
+const calculateCm = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Calculate CM',
+    position: [1120, 0],
+    parameters: {
+      mode: 'runOnceForAllItems',
+      jsCode: `const items = $input.all();
+const fallbackDpi = 300;
+
+function readUInt16(buf, offset, little) { return little ? buf.readUInt16LE(offset) : buf.readUInt16BE(offset); }
+function readUInt32(buf, offset, little) { return little ? buf.readUInt32LE(offset) : buf.readUInt32BE(offset); }
+function rational(buf, offset, little) {
+  const num = readUInt32(buf, offset, little);
+  const den = readUInt32(buf, offset + 4, little);
+  return den ? num / den : 0;
+}
+
+function parseExifDpi(exif) {
+  if (exif.toString('ascii',0,4) !== 'Exif') return null;
+  const tiff = 6;
+  const little = exif.toString('ascii', tiff, tiff+2) === 'II';
+  const ifd0 = tiff + readUInt32(exif, tiff+4, little);
+  const entries = readUInt16(exif, ifd0, little);
+  let xResOffset = null, yResOffset = null, unit = 2;
+  for (let i = 0; i < entries; i++){
+    const e = ifd0 + 2 + i * 12;
+    const tag = readUInt16(exif, e, little);
+    const valueOffset = e + 8;
+    if (tag === 0x011A) xResOffset = readUInt32(exif, valueOffset, little);
+    if (tag === 0x011B) yResOffset = readUInt32(exif, valueOffset, little);
+    if (tag === 0x0128) unit = readUInt16(exif, valueOffset, little);
+  }
+  if (!xResOffset || !yResOffset) return null;
+  let x = rational(exif, tiff + xResOffset, little);
+  let y = rational(exif, tiff + yResOffset, little);
+  if (unit === 3){ x *= 2.54; y *= 2.54; }
+  return {x: x || fallbackDpi, y: y || fallbackDpi};
+}
+
+function parseJpeg(buffer){
+  let offset = 2;
+  let dpi = null;
+  while(offset < buffer.length){
+    if(buffer[offset] !== 0xFF){ offset++; continue; }
+    const marker = buffer[offset+1];
+    if(marker === 0xD9 || marker === 0xDA) break;
+    const size = buffer.readUInt16BE(offset+2);
+    if(marker === 0xE0){
+      const seg = buffer.slice(offset+4, offset+2+size);
+      if(seg.toString('ascii',0,4) === 'JFIF'){
+        const unit = seg[7];
+        let x = seg.readUInt16BE(8);
+        let y = seg.readUInt16BE(10);
+        if(unit === 2){ x *= 2.54; y *= 2.54; }
+        dpi = {x: x || fallbackDpi, y: y || fallbackDpi};
+      }
+    }
+    if(marker === 0xE1){
+      const seg = buffer.slice(offset+4, offset+2+size);
+      const exifDpi = parseExifDpi(seg);
+      if(exifDpi) dpi = exifDpi;
+    }

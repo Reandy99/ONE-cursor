@@ -1,0 +1,22 @@
+  'Google Drive Photo Size (cm) -> Google Sheets [SUCCESS]'
+)
+  .setSettings({
+    executionOrder: 'v1',
+    binaryMode: 'separate',
+    availableInMCP: true,
+  })
+  .setDescription(
+    'Fixed 4-folder iteration (12A-12D) with segmented row output to Google Sheets, PDF report via Google Docs export, and Telegram delivery.'
+  )
+  .add(webhookTrigger)
+  .to(defineFolders)
+  .to(fetchFolderHtml)
+  .to(extractImages)
+  .to(downloadImage)
+  .to(calculateCm)
+  .to(prepareRows)
+  .to(appendToGoogleSheets)
+  .to(generateHtmlReport)
+  .to(createGoogleDoc)
+  .to(exportPdf)
+  .to(sendPdfTelegram);

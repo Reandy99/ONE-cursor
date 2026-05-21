@@ -377,10 +377,10 @@ const geminiExpandImage = node({
     parameters: {
       mode: 'runOnceForEachItem',
       language: 'javaScript',
-      jsCode: `const creds = await this.getCredentials('googlePalmApi');
+      jsCode: `const creds = await this.helpers.getCredentials('googlePalmApi');
 const apiKey = creds.apiKey || creds.key || creds.token;
 if (!apiKey) {
-  throw new Error('Google Gemini API key missing. Connect Google Gemini(PaLM) Api credential on this node.');
+  throw new Error('Google Gemini API key missing on this node (googlePalmApi credential).');
 }
 
 const meta = $json;

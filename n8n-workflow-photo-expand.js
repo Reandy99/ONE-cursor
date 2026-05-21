@@ -389,6 +389,36 @@ const createBackgroundCanvas = node({
   },
 });
 
+const restorePhotoBinary = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Restore Photo Binary',
+    parameters: {
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const layoutBinary = $('Prepare Layout').item.binary;
+const canvasBinary = $input.item.binary?.canvas;
+
+if (!layoutBinary?.data) {
+  throw new Error('Missing resized photo binary before composite.');
+}
+if (!canvasBinary) {
+  throw new Error('Missing canvas binary before composite.');
+}
+
+return {
+  json: $input.item.json,
+  binary: {
+    canvas: canvasBinary,
+    data: layoutBinary.data,
+  },
+};`,
+    },
+    position: [2920, 520],
+  },
+});
+
 const compositeCentered = node({
   type: 'n8n-nodes-base.editImage',
   version: 1,
@@ -503,6 +533,7 @@ export default workflow(
           .to(getImageInfo)
           .to(prepareLayout)
           .to(createBackgroundCanvas)
+          .to(restorePhotoBinary)
           .to(compositeCentered)
           .to(uploadEditedImage)
           .to(nextBatch(processEachPhoto)),

@@ -3,7 +3,6 @@ import {
   node,
   trigger,
   newCredential,
-  merge,
   languageModel,
   splitInBatches,
   nextBatch,
@@ -445,15 +444,6 @@ const processEachPhoto = splitInBatches({
   },
 });
 
-const mergeResults = merge({
-  version: 3.2,
-  config: {
-    name: 'Merge Results',
-    parameters: { mode: 'append' },
-    position: [3360, 360],
-  },
-});
-
 const buildFinalResponse = node({
   type: 'n8n-nodes-base.code',
   version: 2,
@@ -463,22 +453,13 @@ const buildFinalResponse = node({
     parameters: {
       mode: 'runOnceForAllItems',
       language: 'javaScript',
-      jsCode: `const items = $input.all();
-
-const metaItem = items.find((item) => item?.json?.__meta === true);
-if (!metaItem) {
-  throw new Error('Missing summary metadata item.');
-}
-
-const meta = metaItem.json;
-const uploadedFiles = items
-  .filter((item) => item?.json?.__meta !== true)
-  .map((item) => ({
-    id: item.json.id || null,
-    name: item.json.name || null,
-    mimeType: item.json.mimeType || null,
-    webViewLink: item.json.webViewLink || null,
-  }));
+      jsCode: `const meta = $('Build Summary Context').first().json;
+const uploadedFiles = $('Upload Edited Image').all().map((item) => ({
+  id: item.json.id || null,
+  name: item.json.name || null,
+  mimeType: item.json.mimeType || null,
+  webViewLink: item.json.webViewLink || null,
+}));
 
 return [
   {
@@ -510,21 +491,20 @@ export default workflow(
   .to(parseInput)
   .to(verifyGemini)
   .to(attachGeminiStatus)
-  .to(buildSummaryContext.to(mergeResults.input(0)))
+  .to(buildSummaryContext)
   .to(listSourceImages)
   .to(filterImages)
   .to(
-    processEachPhoto.onEachBatch(
-      downloadSourceImage
-        .to(resizeToFit)
-        .to(getImageInfo)
-        .to(prepareLayout)
-        .to(createBackgroundCanvas)
-        .to(compositeCentered)
-        .to(uploadEditedImage)
-        .to(nextBatch(processEachPhoto)),
-    ),
-  )
-  .add(processEachPhoto.onDone(mergeResults.input(1)))
-  .add(mergeResults)
-  .to(buildFinalResponse);
+    processEachPhoto
+      .onDone(buildFinalResponse)
+      .onEachBatch(
+        downloadSourceImage
+          .to(resizeToFit)
+          .to(getImageInfo)
+          .to(prepareLayout)
+          .to(createBackgroundCanvas)
+          .to(compositeCentered)
+          .to(uploadEditedImage)
+          .to(nextBatch(processEachPhoto)),
+      ),
+  );

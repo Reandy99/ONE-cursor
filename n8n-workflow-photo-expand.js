@@ -5,6 +5,8 @@ import {
   newCredential,
   merge,
   languageModel,
+  splitInBatches,
+  nextBatch,
 } from '@n8n/workflow-sdk';
 
 const DEFAULT_FOLDER_URL =
@@ -279,6 +281,27 @@ const downloadSourceImage = node({
   },
 });
 
+const resizeToFit = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
+  config: {
+    name: 'Resize To Fit',
+    parameters: {
+      operation: 'resize',
+      dataPropertyName: 'data',
+      width: '={{ Math.round($("Attach Gemini Status").first().json.outputWidth * 0.78) }}',
+      height: '={{ Math.round($("Attach Gemini Status").first().json.outputHeight * 0.82) }}',
+      resizeOption: 'maximumArea',
+      options: {
+        destinationKey: 'data',
+        fileName: '={{ $binary.data.fileName }}',
+        quality: 92,
+      },
+    },
+    position: [1920, 520],
+  },
+});
+
 const getImageInfo = node({
   type: 'n8n-nodes-base.editImage',
   version: 1,
@@ -288,7 +311,7 @@ const getImageInfo = node({
       operation: 'information',
       dataPropertyName: 'data',
     },
-    position: [1920, 520],
+    position: [2160, 520],
   },
 });
 
@@ -306,18 +329,13 @@ const info = $json || {};
 
 const canvasWidth = Number(request.outputWidth || 1080);
 const canvasHeight = Number(request.outputHeight || 1350);
-const srcWidth = Number(info.width || info.size?.width || 0);
-const srcHeight = Number(info.height || info.size?.height || 0);
+const subjectWidth = Number(info.width || info.size?.width || 0);
+const subjectHeight = Number(info.height || info.size?.height || 0);
 
-if (!srcWidth || !srcHeight) {
-  throw new Error('Could not read source image dimensions for ' + (sourceMeta.name || 'unknown file'));
+if (!subjectWidth || !subjectHeight) {
+  throw new Error('Could not read resized image dimensions for ' + (sourceMeta.name || 'unknown file'));
 }
 
-const maxWidth = Math.round(canvasWidth * 0.78);
-const maxHeight = Math.round(canvasHeight * 0.82);
-const scale = Math.min(maxWidth / srcWidth, maxHeight / srcHeight, 1);
-const subjectWidth = Math.max(1, Math.round(srcWidth * scale));
-const subjectHeight = Math.max(1, Math.round(srcHeight * scale));
 const positionX = Math.max(0, Math.round((canvasWidth - subjectWidth) / 2));
 const positionY = Math.max(0, Math.round((canvasHeight - subjectHeight) / 2));
 
@@ -329,6 +347,7 @@ let outExt = 'jpg';
 if (ext === 'png') outExt = 'png';
 else if (ext === 'webp') outExt = 'webp';
 
+const item = $input.item;
 return {
   json: {
     sourceFileId: sourceMeta.id,
@@ -343,29 +362,8 @@ return {
     outputFileName: 'edited_' + base + '.' + outExt,
     outputFormat: outExt === 'png' ? 'png' : 'jpeg',
   },
+  binary: $('Resize To Fit').item.binary,
 };`,
-    },
-    position: [2160, 520],
-  },
-});
-
-const resizeSubject = node({
-  type: 'n8n-nodes-base.editImage',
-  version: 1,
-  config: {
-    name: 'Resize Subject',
-    parameters: {
-      operation: 'resize',
-      dataPropertyName: 'data',
-      width: '={{ $json.subjectWidth }}',
-      height: '={{ $json.subjectHeight }}',
-      resizeOption: 'ignoreAspectRatio',
-      options: {
-        destinationKey: 'subject',
-        fileName: '={{ $json.outputFileName }}',
-        format: '={{ $json.outputFormat }}',
-        quality: 92,
-      },
     },
     position: [2400, 520],
   },
@@ -400,7 +398,7 @@ const compositeCentered = node({
     parameters: {
       operation: 'composite',
       dataPropertyName: 'canvas',
-      dataPropertyNameComposite: 'subject',
+      dataPropertyNameComposite: 'data',
       positionX: '={{ $json.positionX }}',
       positionY: '={{ $json.positionY }}',
       operator: 'Over',
@@ -435,6 +433,15 @@ const uploadEditedImage = node({
     },
     credentials: googleDriveCreds,
     position: [3120, 520],
+  },
+});
+
+const processEachPhoto = splitInBatches({
+  version: 3,
+  config: {
+    name: 'Process Each Photo',
+    parameters: { batchSize: 1 },
+    position: [1440, 520],
   },
 });
 
@@ -506,12 +513,18 @@ export default workflow(
   .to(buildSummaryContext.to(mergeResults.input(0)))
   .to(listSourceImages)
   .to(filterImages)
-  .to(downloadSourceImage)
-  .to(getImageInfo)
-  .to(prepareLayout)
-  .to(resizeSubject)
-  .to(createBackgroundCanvas)
-  .to(compositeCentered)
-  .to(uploadEditedImage.to(mergeResults.input(1)))
+  .to(
+    processEachPhoto.onEachBatch(
+      downloadSourceImage
+        .to(resizeToFit)
+        .to(getImageInfo)
+        .to(prepareLayout)
+        .to(createBackgroundCanvas)
+        .to(compositeCentered)
+        .to(uploadEditedImage)
+        .to(nextBatch(processEachPhoto)),
+    ),
+  )
+  .add(processEachPhoto.onDone(mergeResults.input(1)))
   .add(mergeResults)
   .to(buildFinalResponse);

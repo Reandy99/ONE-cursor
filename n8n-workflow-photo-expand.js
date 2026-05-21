@@ -1,0 +1,554 @@
+import {
+  workflow,
+  node,
+  trigger,
+  newCredential,
+  merge,
+  languageModel,
+} from '@n8n/workflow-sdk';
+
+const DEFAULT_FOLDER_URL =
+  'https://drive.google.com/drive/u/1/folders/1BZHKczX_Dg-Lw17PuWc_uYJFzvipRQ6y';
+
+const googleDriveCreds = {
+  googleDriveOAuth2Api: newCredential('Google Drive account'),
+};
+
+const openAi9routerCreds = {
+  openAiApi: newCredential('OpenAI account 2'),
+};
+
+const manualTrigger = trigger({
+  type: 'n8n-nodes-base.manualTrigger',
+  version: 1,
+  config: { name: 'Manual Start', position: [-240, 300] },
+  output: [{}],
+});
+
+const webhookTrigger = trigger({
+  type: 'n8n-nodes-base.webhook',
+  version: 2.1,
+  config: {
+    name: 'Receive Expand Request',
+    parameters: {
+      httpMethod: 'POST',
+      path: 'gdrive-photo-expand-center',
+      responseMode: 'lastNode',
+    },
+    position: [-240, 480],
+  },
+  output: [{ body: { folderUrl: DEFAULT_FOLDER_URL } }],
+});
+
+const parseInput = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Parse Input',
+    parameters: {
+      mode: 'runOnceForAllItems',
+      language: 'javaScript',
+      jsCode: `const firstItem = $input.first();
+const payload = firstItem?.json?.body ?? firstItem?.json ?? {};
+
+const folderUrl = String(payload.folderUrl ?? '${DEFAULT_FOLDER_URL}').trim();
+const outputFolderName = String(payload.outputFolderName || 'sudah di expand').trim() || 'sudah di expand';
+const outputWidth = Number(payload.outputWidth ?? 1080);
+const outputHeight = Number(payload.outputHeight ?? 1350);
+const backgroundColor = String(payload.backgroundColor || '#D2B48C').trim();
+const skipGeminiCheck = Boolean(payload.skipGeminiCheck);
+
+const folderPathMatch = folderUrl.match(/\\/folders\\/([a-zA-Z0-9_-]+)/);
+const folderQueryMatch = folderUrl.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+const directIdMatch = /^[a-zA-Z0-9_-]{10,}$/.test(folderUrl) ? folderUrl : '';
+const sourceFolderId = folderPathMatch?.[1] || folderQueryMatch?.[1] || directIdMatch;
+
+if (!sourceFolderId) {
+  throw new Error('Invalid Google Drive folder URL. Use /folders/{id} or id={id}.');
+}
+
+if (!Number.isFinite(outputWidth) || outputWidth <= 0 || !Number.isFinite(outputHeight) || outputHeight <= 0) {
+  throw new Error('outputWidth and outputHeight must be positive numbers.');
+}
+
+const searchQuery = "'" + sourceFolderId + "' in parents and trashed = false and mimeType contains 'image/'";
+
+return [
+  {
+    json: {
+      folderUrl,
+      sourceFolderId,
+      outputFolderName,
+      outputWidth,
+      outputHeight,
+      backgroundColor,
+      skipGeminiCheck,
+      searchQuery,
+      geminiModel: 'gc/gemini-3-flash-preview',
+    },
+  },
+];`,
+    },
+    position: [0, 390],
+  },
+});
+
+const verifyGemini = node({
+  type: '@n8n/n8n-nodes-langchain.chainLlm',
+  version: 1.9,
+  config: {
+    name: 'Verify 9router Gemini',
+    executeOnce: true,
+    parameters: {
+      promptType: 'define',
+      text: '=Reply with exactly: GEMINI_OK',
+      messages: {
+        messageValues: [
+          {
+            type: 'SystemMessagePromptTemplate',
+            message:
+              'You are a connectivity check. Reply with exactly GEMINI_OK and nothing else.',
+          },
+        ],
+      },
+    },
+    subnodes: {
+      model: languageModel({
+        type: '@n8n/n8n-nodes-langchain.lmChatOpenAi',
+        version: 1.3,
+        config: {
+          name: '9router Gemini Model',
+          parameters: {
+            model: {
+              __rl: true,
+              mode: 'id',
+              value: '={{ $("Parse Input").first().json.geminiModel }}',
+            },
+            responsesApiEnabled: false,
+            options: { temperature: 0, maxTokens: 16 },
+          },
+          credentials: openAi9routerCreds,
+          position: [240, 620],
+        },
+      }),
+    },
+    position: [240, 390],
+  },
+  output: [{ text: 'GEMINI_OK' }],
+});
+
+const attachGeminiStatus = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Attach Gemini Status',
+    parameters: {
+      mode: 'runOnceForAllItems',
+      language: 'javaScript',
+      jsCode: `const request = $items('Parse Input', 0, 0)[0]?.json ?? {};
+const geminiText = String($input.first()?.json?.text ?? '').trim();
+const geminiOk = geminiText.includes('GEMINI_OK');
+
+return [
+  {
+    json: {
+      ...request,
+      geminiCheck: {
+        ok: geminiOk,
+        model: request.geminiModel,
+        provider: '9router via OpenAI account 2',
+        responsePreview: geminiText.slice(0, 120),
+      },
+    },
+  },
+];`,
+    },
+    position: [480, 390],
+  },
+});
+
+const createOutputFolder = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'Create Output Folder',
+    parameters: {
+      authentication: 'oAuth2',
+      resource: 'folder',
+      operation: 'create',
+      name: '={{ $json.outputFolderName }}',
+      folderId: { __rl: true, mode: 'id', value: '={{ $json.sourceFolderId }}' },
+      options: { simplifyOutput: true },
+    },
+    credentials: googleDriveCreds,
+    position: [720, 390],
+  },
+});
+
+const shareOutputFolder = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'Share Output Folder',
+    parameters: {
+      authentication: 'oAuth2',
+      resource: 'folder',
+      operation: 'share',
+      folderNoRootId: { __rl: true, mode: 'id', value: '={{ $json.id }}' },
+      permissionsUi: {
+        permissionsValues: {
+          role: 'reader',
+          type: 'anyone',
+          allowFileDiscovery: false,
+        },
+      },
+    },
+    credentials: googleDriveCreds,
+    position: [960, 390],
+  },
+});
+
+const buildSummaryContext = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Build Summary Context',
+    parameters: {
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const request = $items('Attach Gemini Status', 0, 0)[0]?.json ?? {};
+const outputFolder = $items('Create Output Folder', 0, 0)[0]?.json ?? {};
+
+const folderId = String(outputFolder.id || '').trim();
+if (!folderId) {
+  throw new Error('Missing output folder id.');
+}
+
+const folderName = String(outputFolder.name || request.outputFolderName || 'sudah di expand');
+
+return {
+  json: {
+    __meta: true,
+    ok: true,
+    status: 'success',
+    geminiCheck: request.geminiCheck,
+    outputSize: {
+      width: request.outputWidth,
+      height: request.outputHeight,
+      backgroundColor: request.backgroundColor,
+    },
+    outputFolder: {
+      id: folderId,
+      name: folderName,
+      url: 'https://drive.google.com/drive/folders/' + folderId + '?usp=sharing',
+    },
+  },
+};`,
+    },
+    position: [1920, 200],
+  },
+});
+
+const listSourceImages = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'List Source Images',
+    parameters: {
+      authentication: 'oAuth2',
+      resource: 'fileFolder',
+      operation: 'search',
+      searchMethod: 'query',
+      queryString: '={{ $("Attach Gemini Status").first().json.searchQuery }}',
+      returnAll: true,
+    },
+    credentials: googleDriveCreds,
+    position: [1200, 520],
+  },
+});
+
+const filterImages = node({
+  type: 'n8n-nodes-base.filter',
+  version: 2.3,
+  config: {
+    name: 'Filter Valid Images',
+    parameters: {
+      conditions: {
+        options: {
+          caseSensitive: true,
+          leftValue: '',
+          typeValidation: 'strict',
+          version: 2,
+        },
+        combinator: 'and',
+        conditions: [
+          {
+            leftValue: '={{ $json.name }}',
+            rightValue: 'edited_',
+            operator: { type: 'string', operation: 'notStartsWith' },
+          },
+        ],
+      },
+    },
+    position: [1440, 520],
+  },
+});
+
+const downloadSourceImage = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'Download Source Image',
+    parameters: {
+      authentication: 'oAuth2',
+      resource: 'file',
+      operation: 'download',
+      fileId: { __rl: true, mode: 'id', value: '={{ $json.id }}' },
+      options: {
+        binaryPropertyName: 'data',
+        fileName: '={{ $json.name }}',
+      },
+    },
+    credentials: googleDriveCreds,
+    position: [1680, 520],
+  },
+});
+
+const getImageInfo = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
+  config: {
+    name: 'Get Image Info',
+    parameters: {
+      operation: 'information',
+      dataPropertyName: 'data',
+    },
+    position: [1920, 520],
+  },
+});
+
+const prepareLayout = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Prepare Layout',
+    parameters: {
+      mode: 'runOnceForEachItem',
+      language: 'javaScript',
+      jsCode: `const request = $items('Attach Gemini Status', 0, 0)[0]?.json ?? {};
+const sourceMeta = $items('Download Source Image', 0, $itemIndex)[0]?.json ?? {};
+const info = $json || {};
+
+const canvasWidth = Number(request.outputWidth || 1080);
+const canvasHeight = Number(request.outputHeight || 1350);
+const srcWidth = Number(info.width || info.size?.width || 0);
+const srcHeight = Number(info.height || info.size?.height || 0);
+
+if (!srcWidth || !srcHeight) {
+  throw new Error('Could not read source image dimensions for ' + (sourceMeta.name || 'unknown file'));
+}
+
+const maxWidth = Math.round(canvasWidth * 0.78);
+const maxHeight = Math.round(canvasHeight * 0.82);
+const scale = Math.min(maxWidth / srcWidth, maxHeight / srcHeight, 1);
+const subjectWidth = Math.max(1, Math.round(srcWidth * scale));
+const subjectHeight = Math.max(1, Math.round(srcHeight * scale));
+const positionX = Math.max(0, Math.round((canvasWidth - subjectWidth) / 2));
+const positionY = Math.max(0, Math.round((canvasHeight - subjectHeight) / 2));
+
+const sourceName = String($binary?.data?.fileName || sourceMeta.name || 'photo.jpg');
+const hasExt = sourceName.includes('.');
+const base = hasExt ? sourceName.slice(0, sourceName.lastIndexOf('.')) : sourceName;
+const ext = String(hasExt ? sourceName.slice(sourceName.lastIndexOf('.') + 1) : 'jpg').toLowerCase();
+let outExt = 'jpg';
+if (ext === 'png') outExt = 'png';
+else if (ext === 'webp') outExt = 'webp';
+
+return {
+  json: {
+    sourceFileId: sourceMeta.id,
+    sourceFileName: sourceMeta.name,
+    canvasWidth,
+    canvasHeight,
+    backgroundColor: request.backgroundColor || '#D2B48C',
+    subjectWidth,
+    subjectHeight,
+    positionX,
+    positionY,
+    outputFileName: 'edited_' + base + '.' + outExt,
+    outputFormat: outExt === 'png' ? 'png' : 'jpeg',
+  },
+};`,
+    },
+    position: [2160, 520],
+  },
+});
+
+const resizeSubject = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
+  config: {
+    name: 'Resize Subject',
+    parameters: {
+      operation: 'resize',
+      dataPropertyName: 'data',
+      width: '={{ $json.subjectWidth }}',
+      height: '={{ $json.subjectHeight }}',
+      resizeOption: 'ignoreAspectRatio',
+      options: {
+        destinationKey: 'subject',
+        fileName: '={{ $json.outputFileName }}',
+        format: '={{ $json.outputFormat }}',
+        quality: 92,
+      },
+    },
+    position: [2400, 520],
+  },
+});
+
+const createBackgroundCanvas = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
+  config: {
+    name: 'Create Background Canvas',
+    parameters: {
+      operation: 'create',
+      backgroundColor: '={{ $json.backgroundColor }}',
+      width: '={{ $json.canvasWidth }}',
+      height: '={{ $json.canvasHeight }}',
+      options: {
+        destinationKey: 'canvas',
+        fileName: '={{ $json.outputFileName }}',
+        format: '={{ $json.outputFormat }}',
+        quality: 92,
+      },
+    },
+    position: [2640, 520],
+  },
+});
+
+const compositeCentered = node({
+  type: 'n8n-nodes-base.editImage',
+  version: 1,
+  config: {
+    name: 'Composite Centered',
+    parameters: {
+      operation: 'composite',
+      dataPropertyName: 'canvas',
+      dataPropertyNameComposite: 'subject',
+      positionX: '={{ $json.positionX }}',
+      positionY: '={{ $json.positionY }}',
+      operator: 'Over',
+      options: {
+        destinationKey: 'edited',
+        fileName: '={{ $json.outputFileName }}',
+        format: '={{ $json.outputFormat }}',
+        quality: 92,
+      },
+    },
+    position: [2880, 520],
+  },
+});
+
+const uploadEditedImage = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'Upload Edited Image',
+    parameters: {
+      authentication: 'oAuth2',
+      resource: 'file',
+      operation: 'upload',
+      inputDataFieldName: 'edited',
+      name: '={{ $json.outputFileName }}',
+      folderId: {
+        __rl: true,
+        mode: 'id',
+        value: '={{ $("Create Output Folder").first().json.id }}',
+      },
+      options: { simplifyOutput: true },
+    },
+    credentials: googleDriveCreds,
+    position: [3120, 520],
+  },
+});
+
+const mergeResults = merge({
+  version: 3.2,
+  config: {
+    name: 'Merge Results',
+    parameters: { mode: 'append' },
+    position: [3360, 360],
+  },
+});
+
+const buildFinalResponse = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Build Final Response',
+    executeOnce: true,
+    parameters: {
+      mode: 'runOnceForAllItems',
+      language: 'javaScript',
+      jsCode: `const items = $input.all();
+
+const metaItem = items.find((item) => item?.json?.__meta === true);
+if (!metaItem) {
+  throw new Error('Missing summary metadata item.');
+}
+
+const meta = metaItem.json;
+const uploadedFiles = items
+  .filter((item) => item?.json?.__meta !== true)
+  .map((item) => ({
+    id: item.json.id || null,
+    name: item.json.name || null,
+    mimeType: item.json.mimeType || null,
+    webViewLink: item.json.webViewLink || null,
+  }));
+
+return [
+  {
+    json: {
+      ok: true,
+      status: meta.status || 'success',
+      geminiCheck: meta.geminiCheck,
+      outputSize: meta.outputSize,
+      outputFolder: meta.outputFolder,
+      totalUploaded: uploadedFiles.length,
+      uploadedFiles,
+      note:
+        'Background expanded using canvas fill + centered composite. Gemini via 9router is used for connectivity check; swap in image-edit model when available.',
+    },
+  },
+];`,
+    },
+    position: [3600, 360],
+  },
+});
+
+export default workflow(
+  'gdrive-photo-expand-center',
+  'Google Drive Photo Expand + Center',
+)
+  .add(manualTrigger)
+  .to(parseInput)
+  .add(webhookTrigger)
+  .to(parseInput)
+  .to(verifyGemini)
+  .to(attachGeminiStatus)
+  .to(createOutputFolder)
+  .to(shareOutputFolder)
+  .to(buildSummaryContext.to(mergeResults.input(0)))
+  .to(listSourceImages)
+  .to(filterImages)
+  .to(downloadSourceImage)
+  .to(getImageInfo)
+  .to(prepareLayout)
+  .to(resizeSubject)
+  .to(createBackgroundCanvas)
+  .to(compositeCentered)
+  .to(uploadEditedImage.to(mergeResults.input(1)))
+  .add(mergeResults)
+  .to(buildFinalResponse);

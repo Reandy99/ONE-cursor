@@ -1,0 +1,815 @@
+"""Simple Threads public search crawler for photographer/videographer leads.
+
+This script intentionally does not log in, send messages, comment, like, or try
+to bypass platform protections. It only reads public content that is visible to
+the browser session.
+"""
+
+import asyncio
+import csv
+import hashlib
+import json
+import logging
+import re
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import requests
+from playwright.async_api import (
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
+from requests import RequestException
+
+import config
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("threads-job-crawler")
+
+
+POST_CONTAINER_SELECTORS = [
+    "article",
+    '[role="article"]',
+    'div:has(a[href*="/post/"])',
+]
+POST_LINK_SELECTOR = 'a[href*="/post/"]'
+
+
+def get_local_timezone() -> ZoneInfo:
+    try:
+        return ZoneInfo(config.LOCAL_TIMEZONE)
+    except ZoneInfoNotFoundError:
+        logger.warning(
+            "Unknown LOCAL_TIMEZONE=%r. Falling back to Asia/Jakarta.",
+            config.LOCAL_TIMEZONE,
+        )
+        return ZoneInfo("Asia/Jakarta")
+
+
+LOCAL_TZ = get_local_timezone()
+
+ACCESS_RESTRICTION_HINTS = [
+    "log in",
+    "login",
+    "sign up",
+    "masuk",
+    "captcha",
+    "challenge",
+    "try again later",
+    "something went wrong",
+]
+
+CSV_FIELDS = [
+    "keyword",
+    "username",
+    "posted_at",
+    "post_age_hours",
+    "text",
+    "post_url",
+    "scraped_at",
+    "lead_score",
+    "matched_locations",
+    "matched_positive_keywords",
+    "matched_negative_keywords",
+    "status",
+]
+
+
+@dataclass
+class Lead:
+    keyword: str
+    username: str
+    posted_at: str
+    post_age_hours: float | None
+    text: str
+    post_url: str
+    scraped_at: str
+    lead_score: int
+    matched_locations: list[str]
+    matched_positive_keywords: list[str]
+    matched_negative_keywords: list[str]
+    status: str
+    unique_id: str
+
+    def to_output_dict(self) -> dict[str, Any]:
+        return {
+            "keyword": self.keyword,
+            "username": self.username,
+            "posted_at": self.posted_at,
+            "post_age_hours": self.post_age_hours,
+            "text": self.text,
+            "post_url": self.post_url,
+            "scraped_at": self.scraped_at,
+            "lead_score": self.lead_score,
+            "matched_locations": self.matched_locations,
+            "matched_positive_keywords": self.matched_positive_keywords,
+            "matched_negative_keywords": self.matched_negative_keywords,
+            "status": self.status,
+        }
+
+    def to_csv_dict(self) -> dict[str, Any]:
+        data = self.to_output_dict()
+        for field in (
+            "matched_locations",
+            "matched_positive_keywords",
+            "matched_negative_keywords",
+        ):
+            data[field] = "; ".join(data[field])
+        return data
+
+
+def load_keywords(path: Path) -> list[str]:
+    if not path.exists():
+        raise FileNotFoundError(f"Keyword file not found: {path}")
+
+    keywords: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        keyword = line.strip()
+        if keyword and not keyword.startswith("#"):
+            keywords.append(keyword)
+    return keywords
+
+
+def load_seen_posts(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        logger.warning("Could not parse %s. Starting with an empty seen set.", path)
+        return set()
+
+    if isinstance(data, list):
+        return {str(item) for item in data}
+
+    logger.warning("%s should contain a JSON list. Starting with an empty seen set.", path)
+    return set()
+
+
+def save_seen_posts(path: Path, seen_posts: set[str]) -> None:
+    path.write_text(
+        json.dumps(sorted(seen_posts), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def find_matches(text: str, keywords: list[str]) -> list[str]:
+    lowered = text.lower()
+    return [keyword for keyword in keywords if keyword.lower() in lowered]
+
+
+def find_location_matches(text: str) -> list[str]:
+    return find_matches(text, config.LOCATION_KEYWORDS)
+
+
+def find_positive_matches(text: str) -> list[str]:
+    return find_matches(text, config.POSITIVE_KEYWORDS)
+
+
+def find_negative_matches(text: str) -> list[str]:
+    return find_matches(text, config.NEGATIVE_KEYWORDS)
+
+
+def calculate_lead_score(text: str) -> int:
+    positive_matches = find_positive_matches(text)
+    negative_matches = find_negative_matches(text)
+    location_matches = find_location_matches(text)
+
+    score = len(positive_matches) * config.POSITIVE_SCORE
+    score += len(negative_matches) * config.NEGATIVE_SCORE
+
+    if location_matches:
+        score += config.LOCATION_SCORE
+
+    return score
+
+
+def has_location_match(text: str) -> bool:
+    return bool(find_location_matches(text))
+
+
+def passes_location_filter(text: str) -> bool:
+    return not config.REQUIRE_LOCATION_MATCH or has_location_match(text)
+
+
+def extract_post_age(timestamp_text: str, now: datetime | None = None) -> timedelta | None:
+    """Parse visible Threads timestamps into an approximate post age.
+
+    Public Threads search exposes timestamp links as text such as "12 menit",
+    "3 jam", "1 hari", or sometimes a date. Parsing only the timestamp label
+    avoids confusing event duration text ("4 jam kerja") with post age.
+    """
+    now = now or datetime.now(LOCAL_TZ)
+    timestamp_scope = timestamp_text.lower().strip()
+    if not timestamp_scope:
+        return None
+
+    parsed_timestamp = parse_timestamp_datetime(timestamp_scope)
+    if parsed_timestamp:
+        return now - parsed_timestamp.astimezone(LOCAL_TZ)
+
+    date_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", timestamp_scope)
+    if date_match:
+        if not config.ACCEPT_DATE_ONLY_CURRENT_DAY:
+            return None
+
+        day, month, year = (int(part) for part in date_match.groups())
+        if now.date() == datetime(year, month, day, tzinfo=LOCAL_TZ).date():
+            return timedelta(seconds=0)
+        return None
+
+    if any(marker in timestamp_scope for marker in ("baru saja", "just now", "seconds ago")):
+        return timedelta(seconds=0)
+
+    minute_match = re.search(r"\b(\d+)\s*(menit|mnt|min|mins|minute|minutes)\b", timestamp_scope)
+    if minute_match:
+        return timedelta(minutes=int(minute_match.group(1)))
+
+    hour_match = re.search(r"\b(\d+)\s*(jam|hour|hours|hr|hrs|h)\b", timestamp_scope)
+    if hour_match:
+        return timedelta(hours=int(hour_match.group(1)))
+
+    day_match = re.search(r"\b(\d+)\s*(hari|day|days|d)\b", timestamp_scope)
+    if day_match or "kemarin" in timestamp_scope or "yesterday" in timestamp_scope:
+        return timedelta(days=int(day_match.group(1)) if day_match else 1)
+
+    return None
+
+
+def parse_timestamp_datetime(value: str) -> datetime | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+
+    for date_format in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S.%f%z"):
+        try:
+            return datetime.strptime(cleaned, date_format)
+        except ValueError:
+            continue
+
+    try:
+        return datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def get_post_age(posted_at: str, text: str, now: datetime | None = None) -> timedelta | None:
+    if posted_at:
+        return extract_post_age(posted_at, now)
+    return extract_post_age(text[:120], now)
+
+
+def post_age_to_hours(age: timedelta | None) -> float | None:
+    if age is None:
+        return None
+    return round(age.total_seconds() / 3600, 2)
+
+
+def passes_recency_filter(posted_at: str, text: str, now: datetime | None = None) -> bool:
+    if not config.REQUIRE_RECENT_POSTS:
+        return True
+
+    age = get_post_age(posted_at, text, now)
+    if age is None:
+        return False
+
+    return timedelta(seconds=0) <= age <= timedelta(hours=config.MAX_POST_AGE_HOURS)
+
+
+def normalize_post_url(url: str) -> str:
+    if not url:
+        return ""
+
+    absolute_url = urljoin("https://www.threads.net", url)
+    parsed = urlparse(absolute_url)
+    if not any(domain in parsed.netloc for domain in ("threads.net", "threads.com")):
+        return ""
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if "post" in path_parts:
+        post_index = path_parts.index("post")
+        if len(path_parts) > post_index + 1:
+            path_parts = path_parts[: post_index + 2]
+
+    # Drop query/fragment values so the same post does not appear as duplicates.
+    canonical_path = "/" + "/".join(path_parts)
+    return urlunparse((parsed.scheme, parsed.netloc, canonical_path.rstrip("/"), "", "", ""))
+
+
+def make_unique_id(post_url: str, text: str) -> str:
+    if post_url:
+        return post_url
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def extract_username_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    for part in parsed.path.split("/"):
+        if part.startswith("@") and len(part) > 1:
+            return part[1:]
+    return ""
+
+
+def extract_username_from_text(text: str) -> str:
+    match = re.search(r"@([A-Za-z0-9._]+)", text)
+    return match.group(1) if match else ""
+
+
+def find_post_url(links: list[dict[str, str]]) -> str:
+    for link in links:
+        href = link.get("href", "")
+        if "/post/" in href:
+            return normalize_post_url(href)
+    return ""
+
+
+def find_username(links: list[dict[str, str]], post_url: str, text: str) -> str:
+    username = extract_username_from_url(post_url)
+    if username:
+        return username
+
+    for link in links:
+        href = normalize_post_url(link.get("href", ""))
+        username = extract_username_from_url(href)
+        if username:
+            return username
+
+    return extract_username_from_text(text)
+
+
+async def get_container_text(container: Any) -> str:
+    """Return readable text without failing if Threads changes its markup."""
+    try:
+        text = await container.inner_text(timeout=2_000)
+        return normalize_text(text)
+    except PlaywrightError:
+        return ""
+
+
+async def get_container_links(container: Any) -> list[dict[str, str]]:
+    try:
+        links = await container.locator("a").evaluate_all(
+            """elements => elements.map(element => ({
+                href: element.href || element.getAttribute("href") || "",
+                text: element.innerText || element.textContent || ""
+            }))"""
+        )
+    except PlaywrightError:
+        return []
+
+    cleaned_links: list[dict[str, str]] = []
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        cleaned_links.append(
+            {
+                "href": str(link.get("href", "")),
+                "text": normalize_text(str(link.get("text", ""))),
+            }
+        )
+    return cleaned_links
+
+
+async def extract_posts_from_links(page: Any) -> list[dict[str, str]]:
+    """Extract individual post candidates by starting from post permalinks.
+
+    Threads search markup changes often. In current public search pages, the
+    most stable signal is the permalink containing "/post/"; walking up to the
+    nearest parent with only one post link avoids collecting the whole results
+    column as a single lead.
+    """
+    anchors = page.locator(POST_LINK_SELECTOR)
+    try:
+        anchor_count = min(
+            await anchors.count(),
+            config.POST_EXTRACTION_LIMIT_PER_KEYWORD,
+        )
+    except PlaywrightError as exc:
+        logger.debug("Post link count failed: %s", exc)
+        return []
+
+    posts: list[dict[str, str]] = []
+    for index in range(anchor_count):
+        try:
+            post = await anchors.nth(index).evaluate(
+                f"""(anchor) => {{
+                    const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+                    let bestNode = null;
+                    let fallbackNode = null;
+                    let node = anchor;
+
+                    for (let level = 0; node && level < 12; level += 1, node = node.parentElement) {{
+                        const text = normalize(node.innerText || node.textContent || "");
+                        if (text.length < 40) {{
+                            continue;
+                        }}
+
+                        const postLinkCount = node.querySelectorAll({POST_LINK_SELECTOR!r}).length;
+                        if (!fallbackNode || text.length < normalize(fallbackNode.innerText || fallbackNode.textContent || "").length) {{
+                            fallbackNode = node;
+                        }}
+
+                        if (postLinkCount <= 1) {{
+                            bestNode = node;
+                            break;
+                        }}
+                    }}
+
+                    const container = bestNode || fallbackNode || anchor;
+                    return {{
+                        href: anchor.href || anchor.getAttribute("href") || "",
+                        posted_at: normalize(anchor.innerText || anchor.textContent || ""),
+                        text: normalize(container.innerText || container.textContent || ""),
+                    }};
+                }}"""
+            )
+        except PlaywrightError as exc:
+            logger.debug("Post link extraction failed at index %s: %s", index, exc)
+            continue
+
+        posts.append(post)
+
+    merged_posts: dict[str, dict[str, str]] = {}
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+
+        text = normalize_text(str(post.get("text", "")))
+        posted_at = normalize_text(str(post.get("posted_at", "")))
+        post_url = normalize_post_url(str(post.get("href", "")))
+        if not text or not post_url:
+            continue
+
+        existing_post = merged_posts.get(post_url)
+        if existing_post is None:
+            merged_posts[post_url] = {"text": text, "posted_at": posted_at}
+            continue
+
+        if posted_at and not existing_post["posted_at"]:
+            existing_post["posted_at"] = posted_at
+
+        existing_text = existing_post["text"]
+        if text not in existing_text:
+            if existing_text in text:
+                existing_post["text"] = text
+            else:
+                existing_post["text"] = normalize_text(f"{existing_text} {text}")
+
+    return [
+        {"text": post["text"], "posted_at": post["posted_at"], "post_url": post_url}
+        for post_url, post in merged_posts.items()
+    ]
+
+
+async def find_post_containers(page: Any) -> Any | None:
+    for selector in POST_CONTAINER_SELECTORS:
+        try:
+            locator = page.locator(selector)
+            count = await locator.count()
+        except PlaywrightError as exc:
+            logger.debug("Selector failed (%s): %s", selector, exc)
+            continue
+
+        if count > 0:
+            logger.info("Using post selector %r with %s candidates.", selector, count)
+            return locator
+
+    return None
+
+
+async def maybe_log_access_restriction(page: Any, keyword: str) -> None:
+    try:
+        body_text = (await page.locator("body").inner_text(timeout=2_000)).lower()
+    except PlaywrightError:
+        return
+
+    if any(hint in body_text for hint in ACCESS_RESTRICTION_HINTS):
+        logger.warning(
+            "Threads may be limiting public access for keyword %r. "
+            "Try running with THREADS_HEADLESS=false and inspect the page manually.",
+            keyword,
+        )
+
+
+async def scroll_page(page: Any) -> None:
+    for index in range(config.SCROLL_COUNT):
+        await page.mouse.wheel(0, 1800)
+        await page.wait_for_timeout(int(config.SCROLL_DELAY_SECONDS * 1000))
+        logger.debug("Finished scroll %s/%s.", index + 1, config.SCROLL_COUNT)
+
+
+def build_lead(keyword: str, text: str, post_url: str, posted_at: str, scraped_at: str) -> Lead:
+    post_age = get_post_age(posted_at, text)
+    return Lead(
+        keyword=keyword,
+        username=find_username([], post_url, text),
+        posted_at=posted_at,
+        post_age_hours=post_age_to_hours(post_age),
+        text=text,
+        post_url=post_url,
+        scraped_at=scraped_at,
+        lead_score=calculate_lead_score(text),
+        matched_locations=find_location_matches(text),
+        matched_positive_keywords=find_positive_matches(text),
+        matched_negative_keywords=find_negative_matches(text),
+        status="new",
+        unique_id=make_unique_id(post_url, text),
+    )
+
+
+def api_time_range() -> tuple[int, int]:
+    until = datetime.now(timezone.utc)
+    since = until - timedelta(hours=config.MAX_POST_AGE_HOURS)
+    return int(since.timestamp()), int(until.timestamp())
+
+
+def crawl_keyword_with_threads_api(keyword: str) -> list[Lead]:
+    if not config.THREADS_ACCESS_TOKEN:
+        return []
+
+    since, until = api_time_range()
+    params = {
+        "q": keyword,
+        "search_type": config.THREADS_API_SEARCH_TYPE or "RECENT",
+        "search_mode": "KEYWORD",
+        "since": since,
+        "until": until,
+        "limit": min(max(config.THREADS_API_LIMIT, 1), 100),
+        "fields": "id,text,media_type,permalink,timestamp,username,has_replies,is_quote_post,is_reply",
+        "access_token": config.THREADS_ACCESS_TOKEN,
+    }
+
+    try:
+        response = requests.get(
+            config.THREADS_API_KEYWORD_SEARCH_URL,
+            params=params,
+            timeout=config.THREADS_API_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except RequestException as exc:
+        logger.error("Threads API search failed for keyword %r: %s", keyword, exc)
+        return []
+    except ValueError as exc:
+        logger.error("Threads API returned invalid JSON for keyword %r: %s", keyword, exc)
+        return []
+
+    data = payload.get("data", [])
+    if not isinstance(data, list):
+        logger.warning("Threads API response for keyword %r did not contain a data list.", keyword)
+        return []
+
+    scraped_at = datetime.now(timezone.utc).isoformat()
+    leads: list[Lead] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        text = normalize_text(str(item.get("text", "")))
+        post_url = normalize_post_url(str(item.get("permalink", "")))
+        posted_at = normalize_text(str(item.get("timestamp", "")))
+        if not text or not post_url:
+            continue
+
+        if not passes_location_filter(text):
+            continue
+
+        if not passes_recency_filter(posted_at, text):
+            continue
+
+        score = calculate_lead_score(text)
+        if score < config.MIN_LEAD_SCORE:
+            continue
+
+        lead = build_lead(keyword, text, post_url, posted_at, scraped_at)
+        if item.get("username"):
+            lead.username = str(item["username"])
+        leads.append(lead)
+
+    logger.info("Threads API found %s leads for keyword %r.", len(leads), keyword)
+    return leads
+
+
+def crawl_keywords_with_threads_api(keywords: list[str]) -> list[Lead]:
+    all_candidates: list[Lead] = []
+    for keyword in keywords:
+        logger.info("Searching Threads API for %r.", keyword)
+        all_candidates.extend(crawl_keyword_with_threads_api(keyword))
+    return all_candidates
+
+
+async def extract_leads_for_keyword(page: Any, keyword: str) -> list[Lead]:
+    link_posts = await extract_posts_from_links(page)
+    if link_posts:
+        logger.info("Found %s post permalink candidates for keyword %r.", len(link_posts), keyword)
+        scraped_at = datetime.now(timezone.utc).isoformat()
+        leads: list[Lead] = []
+
+        for post in link_posts[: config.POST_EXTRACTION_LIMIT_PER_KEYWORD]:
+            text = post["text"]
+            if not passes_location_filter(text):
+                continue
+
+            posted_at = post.get("posted_at", "")
+            if not passes_recency_filter(posted_at, text):
+                continue
+
+            score = calculate_lead_score(text)
+            if score < config.MIN_LEAD_SCORE:
+                continue
+
+            post_url = post["post_url"]
+            leads.append(build_lead(keyword, text, post_url, posted_at, scraped_at))
+
+        return leads
+
+    containers = await find_post_containers(page)
+    if containers is None:
+        logger.warning("No post containers found for keyword %r.", keyword)
+        await maybe_log_access_restriction(page, keyword)
+        return []
+
+    candidate_count = min(
+        await containers.count(),
+        config.POST_EXTRACTION_LIMIT_PER_KEYWORD,
+    )
+    leads: list[Lead] = []
+    scraped_at = datetime.now(timezone.utc).isoformat()
+
+    for index in range(candidate_count):
+        container = containers.nth(index)
+        text = await get_container_text(container)
+        if not text:
+            continue
+
+        if not passes_location_filter(text):
+            continue
+
+        if not passes_recency_filter("", text):
+            continue
+
+        score = calculate_lead_score(text)
+        if score < config.MIN_LEAD_SCORE:
+            continue
+
+        links = await get_container_links(container)
+        post_url = find_post_url(links)
+        posted_at = ""
+        for link in links:
+            if normalize_post_url(link.get("href", "")) == post_url:
+                posted_at = link.get("text", "")
+                break
+
+        leads.append(build_lead(keyword, text, post_url, posted_at, scraped_at))
+
+    return leads
+
+
+async def crawl_keyword(page: Any, keyword: str) -> list[Lead]:
+    search_url = f"{config.THREADS_SEARCH_URL}?q={quote_plus(keyword)}"
+    logger.info("Searching Threads for %r.", keyword)
+
+    try:
+        await page.goto(
+            search_url,
+            wait_until="domcontentloaded",
+            timeout=config.PAGE_TIMEOUT_MS,
+        )
+        await page.wait_for_timeout(int(config.KEYWORD_DELAY_SECONDS * 1000))
+        await scroll_page(page)
+        return await extract_leads_for_keyword(page, keyword)
+    except PlaywrightTimeoutError:
+        logger.error("Page load timed out for keyword %r. Continuing.", keyword)
+    except PlaywrightError as exc:
+        logger.error("Playwright error for keyword %r: %s", keyword, exc)
+    except Exception:
+        logger.exception("Unexpected error while processing keyword %r.", keyword)
+
+    return []
+
+
+def deduplicate_and_rank(leads: list[Lead], seen_posts: set[str]) -> list[Lead]:
+    new_leads: list[Lead] = []
+    seen_this_run: set[str] = set()
+
+    for lead in leads:
+        if lead.unique_id in seen_posts or lead.unique_id in seen_this_run:
+            continue
+        seen_this_run.add(lead.unique_id)
+        new_leads.append(lead)
+
+    new_leads.sort(key=lambda item: item.lead_score, reverse=True)
+    return new_leads[: config.MAX_LEADS]
+
+
+def write_json(path: Path, leads: list[Lead]) -> None:
+    path.write_text(
+        json.dumps([lead.to_output_dict() for lead in leads], indent=2, ensure_ascii=False)
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_csv(path: Path, leads: list[Lead]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        for lead in leads:
+            writer.writerow(lead.to_csv_dict())
+
+
+def send_to_n8n(leads: list[Lead]) -> None:
+    """Send exported leads to n8n when N8N_WEBHOOK_URL is configured."""
+    if not config.N8N_WEBHOOK_URL:
+        logger.info("N8N_WEBHOOK_URL is empty. Skipping n8n webhook.")
+        return
+
+    payload = {
+        "scraped_at": datetime.now(timezone.utc).isoformat(),
+        "source": "threads",
+        "total_leads": len(leads),
+        "leads": [lead.to_output_dict() for lead in leads],
+    }
+
+    try:
+        response = requests.post(
+            config.N8N_WEBHOOK_URL,
+            json=payload,
+            timeout=config.N8N_REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        logger.info("Sent %s leads to n8n webhook.", len(leads))
+    except RequestException as exc:
+        logger.error("Failed to send leads to n8n webhook: %s", exc)
+
+
+def print_summary(leads: list[Lead]) -> None:
+    print(f"Found {len(leads)} new leads")
+
+    for index, lead in enumerate(leads[:5], start=1):
+        short_text = lead.text[:140] + ("..." if len(lead.text) > 140 else "")
+        print(f"{index}. score={lead.lead_score} | {short_text}")
+
+
+async def run() -> None:
+    keywords = load_keywords(config.KEYWORDS_FILE)
+    if not keywords:
+        logger.warning("No keywords found in %s.", config.KEYWORDS_FILE)
+        print_summary([])
+        return
+
+    config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    seen_posts = load_seen_posts(config.SEEN_POSTS_FILE)
+    all_candidates: list[Lead] = []
+
+    if config.THREADS_ACCESS_TOKEN:
+        logger.info("THREADS_ACCESS_TOKEN is set. Using official Threads API keyword search.")
+        all_candidates = crawl_keywords_with_threads_api(keywords)
+    else:
+        logger.info("THREADS_ACCESS_TOKEN is empty. Using public web search via Playwright.")
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=config.HEADLESS)
+            context = await browser.new_context(locale="id-ID", timezone_id="Asia/Jakarta")
+            page = await context.new_page()
+
+            try:
+                for keyword in keywords:
+                    all_candidates.extend(await crawl_keyword(page, keyword))
+                    await page.wait_for_timeout(int(config.KEYWORD_DELAY_SECONDS * 1000))
+            finally:
+                await context.close()
+                await browser.close()
+
+    new_leads = deduplicate_and_rank(all_candidates, seen_posts)
+    seen_posts.update(lead.unique_id for lead in new_leads)
+
+    write_json(config.JSON_OUTPUT_FILE, new_leads)
+    write_csv(config.CSV_OUTPUT_FILE, new_leads)
+    save_seen_posts(config.SEEN_POSTS_FILE, seen_posts)
+    send_to_n8n(new_leads)
+    print_summary(new_leads)
+
+
+def main() -> None:
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        logger.info("Crawler stopped by user.")
+
+
+if __name__ == "__main__":
+    main()

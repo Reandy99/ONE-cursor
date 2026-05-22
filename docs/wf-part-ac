@@ -1,0 +1,160 @@
+    if([0xC0,0xC1,0xC2,0xC3,0xC5,0xC6,0xC7,0xC9,0xCA,0xCB,0xCD,0xCE,0xCF].includes(marker)){
+      const height = buffer.readUInt16BE(offset+5);
+      const width = buffer.readUInt16BE(offset+7);
+      return {width, height, dpiX: dpi?.x || fallbackDpi, dpiY: dpi?.y || fallbackDpi};
+    }
+    offset += 2 + size;
+  }
+  throw new Error('Unsupported JPEG structure');
+}
+
+function parsePng(buffer){
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  let dpiX = fallbackDpi, dpiY = fallbackDpi;
+  let offset = 8;
+  while(offset < buffer.length){
+    const len = buffer.readUInt32BE(offset);
+    const type = buffer.toString('ascii', offset+4, offset+8);
+    if(type === 'pHYs'){
+      const ppux = buffer.readUInt32BE(offset+8);
+      const ppuy = buffer.readUInt32BE(offset+12);
+      const unit = buffer[offset+16];
+      if(unit === 1){
+        dpiX = ppux / 39.3701;
+        dpiY = ppuy / 39.3701;
+      }
+      break;
+    }
+    offset += 12 + len;
+  }
+  return {width, height, dpiX, dpiY};
+}
+
+const out = [];
+for (let i = 0; i < items.length; i++) {
+  const buf = await this.helpers.getBinaryDataBuffer(i, 'data');
+  let meta;
+  if (buf[0] === 0xFF && buf[1] === 0xD8) meta = parseJpeg(buf);
+  else if (buf.slice(0,8).toString('hex') === '89504e470d0a1a0a') meta = parsePng(buf);
+  else throw new Error('Unsupported file for ' + items[i].json.name);
+
+  const widthCm = +(meta.width / meta.dpiX * 2.54).toFixed(2);
+  const heightCm = +(meta.height / meta.dpiY * 2.54).toFixed(2);
+
+  out.push({
+    json: {
+      folderLabel: items[i].json.folderLabel,
+      name: items[i].json.name,
+      ukuran_cm: widthCm + ' x ' + heightCm + ' cm',
+      width_cm: widthCm,
+      height_cm: heightCm
+    }
+  });
+}
+return out;`,
+    },
+  },
+  output: [{ folderLabel: '12A', name: 'photo.jpg', ukuran_cm: '3.5 x 4.5 cm', width_cm: 3.5, height_cm: 4.5 }],
+});
+
+const prepareRows = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Prepare Rows',
+    position: [1344, 0],
+    parameters: {
+      mode: 'runOnceForAllItems',
+      jsCode: `const items = $input.all().map(i => i.json);
+const order = ['12A', '12B', '12C', '12D'];
+
+const grouped = {};
+for (const item of items) {
+  const label = item.folderLabel;
+  if (!grouped[label]) grouped[label] = [];
+  grouped[label].push(item);
+}
+
+const out = [];
+
+for (const label of order) {
+  if (!grouped[label]) continue;
+
+  out.push({
+    json: {
+      folder_name: label,
+      name: '',
+      ukuran_cm: '',
+      width_cm: '',
+      height_cm: ''
+    }
+  });
+
+  out.push({
+    json: {
+      folder_name: 'nomor',
+      name: 'Nama',
+      ukuran_cm: 'size',
+      width_cm: '',
+      height_cm: ''
+    }
+  });
+
+  grouped[label].forEach((item, idx) => {
+    out.push({
+      json: {
+        folder_name: (idx + 1).toString(),
+        name: item.name,
+        ukuran_cm: item.ukuran_cm,
+        width_cm: item.width_cm,
+        height_cm: item.height_cm
+      }
+    });
+  });
+
+  out.push({
+    json: {
+      folder_name: '',
+      name: '',
+      ukuran_cm: '',
+      width_cm: '',
+      height_cm: ''
+    }
+  });
+}
+
+return out;`,
+    },
+  },
+  output: [{ folder_name: '12A', name: '', ukuran_cm: '' }],
+});
+
+const appendToGoogleSheets = node({
+  type: 'n8n-nodes-base.googleSheets',
+  version: 4.7,
+  config: {
+    name: 'Append to Google Sheets',
+    position: [1568, 0],
+    parameters: {
+      operation: 'append',
+      documentId: {
+        __rl: true,
+        mode: 'id',
+        value: '1-5_BicTXEPxk0pwPPBpkxRwxY8l6-pBNaf4pL2UPMT0',
+      },
+      sheetName: {
+        __rl: true,
+        mode: 'name',
+        value: 'Sheet1',
+      },
+      columns: {
+        mappingMode: 'autoMapInputData',
+      },
+    },
+  },
+  output: [{ spreadsheetId: '1-5_BicTXEPxk0pwPPBpkxRwxY8l6-pBNaf4pL2UPMT0' }],
+});
+
+export default workflow(
+  'E7bMzLuWKui9CovW',

@@ -1,0 +1,160 @@
+import {
+  workflow,
+  node,
+  trigger,
+  newCredential,
+} from '@n8n/workflow-sdk';
+
+const generateHtmlReport = node({
+  type: 'n8n-nodes-base.code',
+  version: 2,
+  config: {
+    name: 'Generate HTML Report',
+    executeOnce: true,
+    position: [1792, 0],
+    parameters: {
+      mode: 'runOnceForAllItems',
+      jsCode: `const rows = $('Prepare Rows').all().map((i) => i.json);
+const generatedAt = $now.setZone('Asia/Jakarta').toFormat('dd MMM yyyy HH:mm');
+const sheetUrl = 'https://docs.google.com/spreadsheets/d/1-5_BicTXEPxk0pwPPBpkxRwxY8l6-pBNaf4pL2UPMT0';
+
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+let body = '';
+let currentFolder = '';
+
+for (const row of rows) {
+  const folder = row.folder_name;
+  const name = row.name;
+  const size = row.ukuran_cm;
+
+  if (['12A', '12B', '12C', '12D'].includes(folder)) {
+    currentFolder = folder;
+    body += '<h2>Kelas ' + esc(folder) + '</h2><table><thead><tr><th>No</th><th>Nama File</th><th>Ukuran (cm)</th></tr></thead><tbody>';
+    continue;
+  }
+
+  if (folder === 'nomor') continue;
+
+  if (!folder && !name && !size) {
+    if (currentFolder) body += '</tbody></table><br/>';
+    currentFolder = '';
+    continue;
+  }
+
+  if (currentFolder && folder && name) {
+    body += '<tr><td>' + esc(folder) + '</td><td>' + esc(name) + '</td><td>' + esc(size) + '</td></tr>';
+  }
+}
+
+if (currentFolder) body += '</tbody></table>';
+
+const html = '<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{font-family:Arial,sans-serif;color:#111;padding:24px}h1{font-size:22px;margin:0 0 8px}h2{font-size:16px;margin:24px 0 8px;color:#333}table{width:100%;border-collapse:collapse;margin-bottom:8px}th,td{border:1px solid #ccc;padding:8px;font-size:12px;text-align:left}th{background:#f3f4f6}.meta{color:#555;font-size:12px;margin-bottom:16px}</style></head><body><h1>Laporan Ukuran Foto (cm)</h1><p class="meta">Kelas 12A-12D | Dibuat: ' + esc(generatedAt) + ' WIB<br/>Google Sheet: ' + esc(sheetUrl) + '</p>' + body + '</body></html>';
+
+return [{ json: { htmlContent: html, reportTitle: 'Laporan Ukuran Foto ' + $now.setZone('Asia/Jakarta').toFormat('yyyy-MM-dd') } }];`,
+    },
+  },
+  output: [{ htmlContent: '<html>...</html>', reportTitle: 'Laporan Ukuran Foto 2026-05-21' }],
+});
+
+const createGoogleDoc = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'Create Google Doc',
+    executeOnce: true,
+    position: [2016, 0],
+    parameters: {
+      resource: 'file',
+      operation: 'createFromText',
+      name: "={{ $('Generate HTML Report').first().json.reportTitle }}",
+      content: "={{ $('Generate HTML Report').first().json.htmlContent }}",
+      options: {
+        convertToGoogleDocument: true,
+      },
+    },
+    credentials: {
+      googleDriveOAuth2Api: newCredential('Google Drive account'),
+    },
+  },
+  output: [{ id: 'doc-id-123' }],
+});
+
+const exportPdf = node({
+  type: 'n8n-nodes-base.googleDrive',
+  version: 3,
+  config: {
+    name: 'Export PDF',
+    executeOnce: true,
+    position: [2240, 0],
+    parameters: {
+      resource: 'file',
+      operation: 'download',
+      fileId: {
+        __rl: true,
+        mode: 'id',
+        value: "={{ $('Create Google Doc').first().json.id }}",
+      },
+      options: {
+        googleFileConversion: {
+          conversion: {
+            docsToFormat: 'application/pdf',
+          },
+        },
+        fileName: "={{ 'laporan-ukuran-foto-' + $now.setZone('Asia/Jakarta').toFormat('yyyy-MM-dd') + '.pdf' }}",
+      },
+    },
+    credentials: {
+      googleDriveOAuth2Api: newCredential('Google Drive account'),
+    },
+  },
+  output: [{ id: 'doc-id-123', name: 'laporan-ukuran-foto-2026-05-21.pdf' }],
+});
+
+const sendPdfTelegram = node({
+  type: 'n8n-nodes-base.telegram',
+  version: 1.2,
+  config: {
+    name: 'Send PDF to Telegram',
+    executeOnce: true,
+    position: [2464, 0],
+    parameters: {
+      resource: 'message',
+      operation: 'sendDocument',
+      chatId: "={{ $('Webhook').first().json.body?.telegram_chat_id || $('Webhook').first().json.telegram_chat_id || '8637267690' }}",
+      binaryData: true,
+      binaryPropertyName: 'data',
+      additionalFields: {
+        appendAttribution: false,
+        caption: "={{ 'Laporan ukuran foto 12A-12D selesai.\\nSheet: https://docs.google.com/spreadsheets/d/1-5_BicTXEPxk0pwPPBpkxRwxY8l6-pBNaf4pL2UPMT0\\nWaktu: ' + $now.setZone('Asia/Jakarta').toFormat('dd MMM yyyy HH:mm') + ' WIB' }}",
+        fileName: "={{ 'laporan-ukuran-foto-' + $now.setZone('Asia/Jakarta').toFormat('yyyy-MM-dd') + '.pdf' }}",
+      },
+    },
+    credentials: {
+      telegramApi: newCredential('Telegram 3'),
+    },
+  },
+  output: [{ ok: true }],
+});
+
+const webhookTrigger = trigger({
+  type: 'n8n-nodes-base.webhook',
+  version: 2.1,
+  config: {
+    name: 'Webhook',
+    position: [0, 0],
+    parameters: {
+      httpMethod: 'POST',
+      path: 'photo-size-cm-12c-success',
+      responseMode: 'lastNode',
+    },
+  },
+  output: [{ body: {} }],
+});
+
+const defineFolders = node({
